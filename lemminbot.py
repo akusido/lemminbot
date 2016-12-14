@@ -36,6 +36,7 @@ BASE_DIR = "{0}/ismael/files/lemminbot".format(os.getenv("OPENSHIFT_DATA_DIR", "
 import json
 import requests
 from datetime import datetime as dt
+from lxml import html
 
 
 def getJSONObject(url):
@@ -55,8 +56,7 @@ def downloadJPEG(url, dest_path):
     f.close()
 
 def getWeatherData(url, xpaths):
-    from lxml import html
-    import json
+
     page = requests.get(url)
     tree = html.fromstring(page.content)
     data = dict()
@@ -84,26 +84,35 @@ def main():
     print("Lemminbot v0.3")
     
     #get weather data
-    weather_json = getWeatherData(WEATHERURL, xpaths)
-    now = dt.utcnow()
-    now_rfc3339 = dt.strftime(now, '%Y-%m-%dT%H:%M:%SZ').replace(":", "-")
+    try:
+        weather_json = getWeatherData(WEATHERURL, xpaths)
+        now = dt.utcnow()
+        now_rfc3339 = dt.strftime(now, '%Y-%m-%dT%H:%M:%SZ').replace(":", "-")
+        
+        weather_dest_dir = "{0}/{1:02}{2:02}{3:02}/weather".format(BASE_DIR, now.year, now.month, now.day)
+        weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
+        weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
+        
+        #check the destination dir, if it doesn't exist, just create it
+        checkAndCreateDir(weather_dest_dir)
+        
+        saveJSON(weather_path, weather_json)
+        print("Saved weather data on {0}".format(weather_path))
+    except IndexError:
+        print("The weather site is dead?")
     
-    weather_dest_dir = "{0}/{1:02}{2:02}{3:02}/weather".format(BASE_DIR, now.year, now.month, now.day)
-    weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
-    weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
     
-    #check the destination dir, if it doesn't exist, just create it
-    checkAndCreateDir(weather_dest_dir)
-    
-    saveJSON(weather_path, weather_json)
-    print("Saved weather data on {0}".format(weather_path))
     
     
     
     #do this for all api endpoints
     for site in APIURL:
         #get the json object from API request
-        obj = getJSONObject(APIURL[site])
+        try:
+            obj = getJSONObject(APIURL[site])
+        except ValueError:
+            print("The {0} API endpoint is dead.".format(site))
+            continue
 
         #get the timestamp
         ts = getDate(obj["timestamp"])
