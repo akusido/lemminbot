@@ -3,11 +3,11 @@
 
 APIURL = dict()
 
+APIURL["hes"] = "https://hyperion.nvf.io/latest-image/f437c149-5311-41f1-bddc-60369e69a000"
 APIURL["dat"] = "https://hyperion.nvf.io/latest-image/f967a20a-7b8b-4afe-b9a5-8b45285627a9"
 APIURL["ict"] = "https://hyperion.nvf.io/latest-image/57068cd1-60ab-4545-915a-e568ee030fa5"
-APIURL["lem"] = "https://hyperion.nvf.io/latest-image/aa389088-02c6-4849-8785-da19683c50c4"
-APIURL["hes"] = "https://hyperion.nvf.io/latest-image/f437c149-5311-41f1-bddc-60369e69a000"
 APIURL["tri"] = "https://hyperion.nvf.io/latest-image/256035cb-c972-4e47-9eb9-def5dfc0f08a"
+APIURL["lem"] = "https://hyperion.nvf.io/latest-image/aa389088-02c6-4849-8785-da19683c50c4"
 
 WEATHERURL = "http://at8.abo.fi/cgi-bin/en/get_weather"
 
@@ -87,17 +87,19 @@ def main(argv):
         #directory and file name 
         dest_dir = "{0}/{1:02}{2:02}{3:02}/{4}".format(BASE_DIR, ts.year, ts.month, ts.day, site)
         dest_filename = "{0}-{1}.jpg".format(site, obj["timestamp"].replace(":", "-"))
-        path = "{0}/{1}".format(dest_dir, dest_filename)
-        
-        #check the destination dir, if it doesn't exist, just create it
+        path = "{0}/{1}".format(dest_dir, dest_filename)        
         checkAndCreateDir(dest_dir)
-        #check if the file has already been downloaded
+
+        #be verbose about status to find problems
         if os.path.exists(path):
             print("We already got the {0}-image!".format(site))
             continue
-        
-        downloadJPEG(obj["file"], path)
-        print("The file is downloaded to {0}{1}".format(path, temp_suffix))
+        elif os.path.exists("{0}{1}".format(path, temp_suffix)):
+            print("Temporary file found, skipping {0}".format(site))
+            continue
+        else:
+            downloadJPEG(obj["file"], path)
+            print("The file is downloaded to {0}{1}".format(path, temp_suffix))
         
     #get weather data
     try:
@@ -108,9 +110,8 @@ def main(argv):
         weather_dest_dir = "{0}/{1:02}{2:02}{3:02}/weather".format(BASE_DIR, now.year, now.month, now.day)
         weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
         weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
-
-        #check the destination dir, if it doesn't exist, just create it
         checkAndCreateDir(weather_dest_dir)
+
         saveJSON(weather_path, weather_json)
         print("Saved weather data on {0}{1}".format(weather_path, temp_suffix))
     except IndexError:
@@ -118,7 +119,7 @@ def main(argv):
     except requests.exceptions.ConnectionError:
         print("Weather data unavailable. Probably abo.fi dead")
 
-    #done, commit to disk with rsync
+    #done, save changes to disk before next run
     for filepath in files:
         os.rename("{0}{1}".format(filepath, temp_suffix), filepath)
         print("{0}{1} ==> {0}".format(filepath, temp_suffix))
