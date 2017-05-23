@@ -70,29 +70,9 @@ def checkAndCreateDir(dest_dir):
         os.makedirs(dest_dir)
     
 def main(argv):
-    print("Lemminbot v0.5-tbo")    
+    print("Lemminbot v0.6-tbo")    
     BASE_DIR = "/tmp/rsyncing"
     print("Downloading to {}".format(BASE_DIR))
-    
-    #get weather data
-    try:
-        weather_json = getWeatherData(WEATHERURL, xpaths)
-        now = dt.utcnow()
-        now_rfc3339 = dt.strftime(now, '%Y-%m-%dT%H:%M:%SZ').replace(":", "-")
-        
-        weather_dest_dir = "{0}/{1:02}{2:02}{3:02}/weather".format(BASE_DIR, now.year, now.month, now.day)
-        weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
-        weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
-        
-        #check the destination dir, if it doesn't exist, just create it
-        checkAndCreateDir(weather_dest_dir)
-        saveJSON(weather_path, weather_json)
-        print("Saved weather data on {0}{1}".format(weather_path, temp_suffix))
-    except IndexError:
-        print("The weather site is dead?")
-    except requests.exceptions.ConnectionError:
-        print("Weather data unavailable. Probably abo.fi dead")
-    
     #do this for all api endpoints
     for site in APIURL:
         #get the json object from API request
@@ -119,7 +99,26 @@ def main(argv):
         downloadJPEG(obj["file"], path)
         print("The file is downloaded to {0}{1}".format(path, temp_suffix))
         
-    
+    #get weather data
+    try:
+        weather_json = getWeatherData(WEATHERURL, xpaths)
+        now = dt.utcnow()
+        now_rfc3339 = dt.strftime(now, '%Y-%m-%dT%H:%M:%SZ').replace(":", "-")
+
+        weather_dest_dir = "{0}/{1:02}{2:02}{3:02}/weather".format(BASE_DIR, now.year, now.month, now.day)
+        weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
+        weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
+
+        #check the destination dir, if it doesn't exist, just create it
+        checkAndCreateDir(weather_dest_dir)
+        saveJSON(weather_path, weather_json)
+        print("Saved weather data on {0}{1}".format(weather_path, temp_suffix))
+    except IndexError:
+        print("The weather site is dead?")
+    except requests.exceptions.ConnectionError:
+        print("Weather data unavailable. Probably abo.fi dead")
+
+    #done, commit to disk with rsync
     for filepath in files:
         os.rename("{0}{1}".format(filepath, temp_suffix), filepath)
         print("{0}{1} ==> {0}".format(filepath, temp_suffix))
