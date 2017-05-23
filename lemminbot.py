@@ -16,7 +16,10 @@ APIURL["ict"] = "https://hyperion.nvf.io/latest-image/57068cd1-60ab-4545-915a-e5
 APIURL["lem"] = "https://hyperion.nvf.io/latest-image/aa389088-02c6-4849-8785-da19683c50c4"
 APIURL["tri"] = "https://hyperion.nvf.io/latest-image/256035cb-c972-4e47-9eb9-def5dfc0f08a"
 
-BASE_DIR = "/home/archiveteam/data"
+#BASE_DIR = "/home/archiveteam/data"
+BASE_DIR = "/tmp/rsyncing"
+files = list()
+temp_suffix = ".iowait"
 
 #the weather info parsed from Abo Akademi
 WEATHERURL = "http://at8.abo.fi/cgi-bin/en/get_weather"
@@ -47,9 +50,10 @@ def getDate(rfc3339):
     return dt.strptime(rfc3339, '%Y-%m-%dT%H:%M:%SZ')
 
 def saveJSON(path, json):
-    f = open(path, "w")
+    f = open("{0}{1}".format(path, temp_suffix), "w")
     f.write(json)
     f.close()
+    files.append(path)
 
 def getWeatherData(url, xpaths):
     page = requests.get(url)
@@ -65,31 +69,39 @@ def checkAndCreateDir(dest_dir):
 
 def downloadJPEG(url, dest_path):
     r = requests.get(url, stream=True)
-    f = open(dest_path, "wb")
+    f = open("{0}{1}".format(dest_path, temp_suffix), "wb")
     f.write(r.content)
     r.close()
     f.close()
+    files.append(dest_path)
     
 def main():
-    print("Lemminbot v0.3-tbo")
+    print("Lemminbot v0.4-tbo started")
+    try:
+        weather_json = getWeatherData(WEATHERURL, xpaths)
+        now = dt.now()
+        now_rfc3339 = dt.strftime(now, '%Y-%m-%dT%H:%M:%SZ').replace(":", "-")
 
-    weather_json = getWeatherData(WEATHERURL, xpaths)
-    now = dt.now()
-    now_rfc3339 = dt.strftime(now, '%Y-%m-%dT%H:%M:%SZ').replace(":", "-")
-    
-    weather_dest_dir = "{0}/weather".format(BASE_DIR)
-    weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
-    weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
-    
-    #check the destination dir, if it doesn't exist, just create it
-    checkAndCreateDir(weather_dest_dir)
-    saveJSON(weather_path, weather_json)
+        weather_dest_dir = "{0}/weather".format(BASE_DIR)
+        weather_dest_filename = "weather-{0}.json".format(now_rfc3339)
+        weather_path = "{0}/{1}".format(weather_dest_dir, weather_dest_filename)
+        #check the destination dir, if it doesn't exist, just create it
+        checkAndCreateDir(weather_dest_dir)
+
+        saveJSON(weather_path, weather_json)
+        print("Saved weather data to {0}{1}".format(weather_path, temp_suffix))
+    except IndexError:
+        print("The weather site is dead?")
     
     #do this for all api endpoints
     for site in APIURL:
+        try:
         #get the json object from API request
-        obj = getJSONObject(APIURL[site])
-        ts = getDate(obj["timestamp"])    
+            obj = getJSONObject(APIURL[site])
+            ts = getDate(obj["timestamp"])
+        except ValueError:
+            print("The {0} API endpoint is dead.".format(site))
+            continue
 
         #directory and file name 
         frame_dest_dir = "{0}/{1:02}{2:02}{3:02}/{4}".format(BASE_DIR, ts.year, ts.month, ts.day, site)
@@ -104,9 +116,13 @@ def main():
         
         #download file
         downloadJPEG(obj["file"], path)
-        print("The frame was saved to {0}.".format(path))
+        print("The frame was saved to {0}{1}".format(path, temp_suffix))
+
+    for filepath in files:
+        os.rename("{0}{1}".format(filepath, temp_suffix), filepath)
+        print("{0}{1} ==> {0}".format(filepath, temp_suffix))
+
 
 if __name__ == "__main__":
     # execute only if run as a script
     main()
-
