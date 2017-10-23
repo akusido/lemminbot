@@ -67,8 +67,12 @@ def main(argv):
 
     #done, commit changes to disk before next run
     for filepath in files:
-        os.rename("{0}{1}".format(filepath, temp_suffix), filepath)
-        print("{0}{1} ==> {0}".format(filepath, temp_suffix))
+        try:
+            os.rename("{0}{1}".format(filepath, temp_suffix), filepath)
+            print("{0}{1} ==> {0}".format(filepath, temp_suffix))
+        except:
+            print("{0} was already done!".format(filepath))
+    
 
 if __name__ == "__main__":
     # execute only if run as a script
