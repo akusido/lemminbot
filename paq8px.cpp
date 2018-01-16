@@ -1,4 +1,4 @@
-﻿/* paq8px file compressor/archiver.  Released on January 9, 2018
+﻿/* paq8px file compressor/archiver.  Released on January 14, 2018
 
     Copyright (C) 2008 Matt Mahoney, Serge Osnach, Alexander Ratushnyak,
     Bill Pettis, Przemyslaw Skibinski, Matthew Fite, wowtiger, Andrew Paterson,
@@ -43,7 +43,7 @@ The compressed output file is named by adding ".paq8px" extension to
 the first named file (file1.paq8px).  Each file that exists will be
 added to the archive and its name will be stored without a path.
 The option -N specifies a compression level ranging from -0
-(fastest) to -8 (smallest).  The default is -5.  If there is
+(fastest) to -9 (smallest).  The default is -5.  If there is
 no option and only one file, then the program will pause when
 finished until you press the ENTER key (to support drag and drop).
 If file1.paq8px exists then it is overwritten.
@@ -599,7 +599,7 @@ Added gif recompression
 //Change the following values on a new build if applicable
 
 #define PROGNAME     "paq8px"  // Change this if you make a branch
-#define PROGVERSION  "129"
+#define PROGVERSION  "130"
 #define PROGYEAR     "2018"
 
 #define DEFAULT_LEVEL 5
@@ -628,7 +628,9 @@ Added gif recompression
 #include <dirent.h>
 #include <errno.h>
 #else
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -749,7 +751,7 @@ public:
 // Constructors for T are not called, the allocated memory is initialized to 0s.
 // It's the caller's responsibility to populate the array with elements.
 // Parameters are checked and indexing is bounds checked if assertions are on.
-// Copy and assignment are not supported.
+// Use of copy and assignment constructors are not supported.
 //
 // a.size(): returns the number of T elements currently in the array.
 // a.resize(newsize): grows or shrinks the array.
@@ -759,7 +761,7 @@ public:
 static void chkindex(U64 index, U64 upper_bound)
 {
   if (index>=upper_bound) {
-    fprintf(stderr, "%d out of bounds %d\n", index, upper_bound);
+    fprintf(stderr, "%I64u out of bounds %I64u\n", index, upper_bound);
     quit();
   }
 }
@@ -793,9 +795,9 @@ public:
   void resize(U64 new_size);
   void pop_back() {assert(used_size>0); --used_size; }  // decrement size
   void push_back(const T& x);  // increment size, append x
+  Array(const Array&) { assert(false); } //prevent copying - this method must be public (gcc must see it but actually won't use it)
 private:
-  Array(const Array&);  // no copy or assignment
-  Array& operator=(const Array&);
+  Array& operator=(const Array&); //prevent assignment
 };
 
 template<class T, const int Align> void Array<T,Align>::create(U64 requested_size) {
@@ -874,16 +876,16 @@ public:
 };
 
 
-/////////////////////////// IO classes //////////////////////////
-// These classes  take the responsibility for all the file/folder
+//////////////////// IO functions and classes ///////////////////
+// These classes are responsible for all the file/folder
 // operations.
 
 /////////////////////////// Folders /////////////////////////////
 
 int makedir(const char* dir) {
   struct stat status;
-  stat(dir, &status);
-  if (status.st_mode & S_IFDIR) return -1; //-1: directory already exists, no need to create
+  bool success = stat(dir, &status)==0;
+  if(success && (status.st_mode & S_IFDIR)!=0) return -1; //-1: directory already exists, no need to create
   #ifdef WINDOWS
     bool created = (CreateDirectory(dir, 0) == TRUE);
   #else
@@ -929,9 +931,9 @@ void makedirectories(const char* filename) {
 //
 // On Windows when using tmpfile() the temporary file may be created 
 // in the root directory causing access denied error when User Account Control (UAC) is on.
-// To avoid this issue we create the temporary file in the same directory where the 
-// executable resides. Luckily the MS C runtime library provides two (MS specific) fopen() 
-// flags: "T"emporary and "D"elete.
+// To avoid this issue with tmpfile() we simply use fopen() instead.
+// We create the temporary file in the directory where the executable is launched from. 
+// Luckily the MS C runtime library provides two (MS specific) fopen() flags: "T"emporary and "D"elete.
 FILE* maketmpfile(void) {
 #if defined(WINDOWS)  
   char szTempFileName[MAX_PATH];
@@ -953,10 +955,10 @@ public:
   virtual void close() = 0;
   virtual int getc() = 0;
   virtual void putc(U8 c) = 0;
-  void append(const char* s) { for (int i = 0; s[i]; i++)putc(s[i]); }
+  void append(const char* s) {for (int i = 0; s[i]; i++)putc(s[i]);}
   virtual U64 blockread(U8 *ptr, U64 count) = 0;
   virtual U64 blockwrite(U8 *ptr, U64 count) = 0;
-  U32 get32() { return (getc() << 24) | (getc() << 16) | (getc() << 8) | (getc()); }
+  U32 get32(){return (getc() << 24) | (getc() << 16) | (getc() << 8) | (getc());}
   void put32(U32 x){putc((x >> 24) & 255); putc((x >> 16) & 255); putc((x >> 8) & 255); putc(x & 255);}
   virtual void setpos(U64 newpos) = 0;
   virtual void setend() = 0;
@@ -971,9 +973,24 @@ protected:
   FILE *file;
 public:
   FileDisk() {file=0;}
-  bool open(const char *filename) { assert(file==0); file = fopen(filename, "rb+"); return file != 0; }
-  void create(const char *filename) { assert(file==0); makedirectories(filename); file = fopen(filename, "wb+"); if (!file) quit("FileDisk: unable to create file"); }
-  void createtmp() { assert(file==0); file = maketmpfile(); if (!file) quit("FileDisk: unable to create temporary file"); }
+  bool open(const char *filename) { 
+    assert(file==0); 
+    file = fopen(filename, "rb"); 
+    bool success=(file!=0);
+    if(!success)printf("FileDisk: unable to open file (%s)\n", strerror(errno));
+    return success; 
+  }
+  void create(const char *filename) { 
+    assert(file==0); 
+    makedirectories(filename); 
+    file=fopen(filename, "wb+");
+    if (!file) quit("FileDisk: unable to create file"); 
+  }
+  void createtmp() { 
+    assert(file==0); 
+    file = maketmpfile(); 
+    if (!file) quit("FileDisk: unable to create temporary file"); 
+  }
   void close() { if(file) fclose(file); file=0;}
   int getc() { return fgetc(file); }
   void putc(U8 c) { fputc(c, file); }
@@ -1065,7 +1082,7 @@ public:
     {
       U64 available = filesize - filepos;
       if (available<count)count = available;
-      memcpy(ptr, &((*content_in_ram)[(U32)filepos]), count);
+      if(count>0)memcpy(ptr, &((*content_in_ram)[(U32)filepos]), count);
       filepos += count;
       return count;
     }
@@ -1076,7 +1093,7 @@ public:
       if (filepos+count <= MAX_RAM_FOR_TMP_CONTENT) 
       { 
         (*content_in_ram).resize((U32)(filepos + count));
-        memcpy(&((*content_in_ram)[(U32)filepos]), ptr, count);
+        if(count>0)memcpy(&((*content_in_ram)[(U32)filepos]), ptr, count);
         filesize += count;
         filepos += count;
         return count;
@@ -1087,10 +1104,10 @@ public:
   }
   void setpos(U64 newpos) { 
     if(content_in_ram) {
-      filepos = newpos; 
-      assert(filepos<=filesize);// attempt to seek past end of file
+      if(newpos>filesize)ram_to_disk(); //panic: we don't support seeking past end of file - let's switch to disk
+      else {filepos = newpos; return;}
     }  
-    else (*file_on_disk).setpos(newpos);
+    (*file_on_disk).setpos(newpos);
   }
   void setend() { 
     if(content_in_ram) filepos = filesize;
@@ -1129,19 +1146,19 @@ public:
 
 // Buf(n) buf; creates an array of n bytes (must be a power of 2).
 // buf[i] returns a reference to the i'th byte with wrap (no out of bounds).
-// buf(i) returns i'th byte back from pos (i > 0)
+// buf(i) returns i'th byte back from pos (i>0) with wrap (no out of bounds)
 // buf.size() returns n.
 
-int pos;  // Number of input bytes in buf (not wrapped)
+int pos;  // Number of input bytes in buf (not wrapped), must be masked for indexing
 
 class Buf {
   Array<U8> b;
 public:
-  Buf(U64 i=0): b(i) {}
-  void setsize(U64 i) {
-    if (!i) return;
-    assert(i>0 && (i&(i-1))==0);
-    b.resize(i);
+  Buf(U64 size=0): b(size) {}
+  void setsize(U64 newsize) {
+    if (newsize==0) return;
+    assert(newsize>0 && (newsize&(newsize-1))==0); //power of 2?
+    b.resize(newsize);
   }
   U8& operator[](U64 i) {
     return b[i&(b.size()-1)];
@@ -1154,7 +1171,7 @@ public:
   }
 };
 
-// IntBuf(n) is a buffer of n int (must be a power of 2).
+// IntBuf(n) is a buffer of n ints (n must be a power of 2).
 // intBuf[i] returns a reference to i'th element with wrap.
 
 class IntBuf {
@@ -1174,7 +1191,7 @@ inline bool hasRecursion(Filetype ft) { return ft==CD || ft==ZLIB || ft==BASE64 
 inline bool hasInfo(Filetype ft) { return ft==IMAGE1 || ft==IMAGE4 || ft==IMAGE8 || ft==IMAGE8GRAY || ft==IMAGE24 || ft==IMAGE32 || ft==AUDIO || ft==PNG8 || ft==PNG8GRAY || ft==PNG24 || ft==PNG32; }
 inline bool hasTransform(Filetype ft) { return ft==IMAGE24 || ft==IMAGE32 || ft==EXE || ft==CD || ft==ZLIB || ft==BASE64 || ft==GIF; }
 
-int level=DEFAULT_LEVEL;  // Compression level 0 to 8
+int level=DEFAULT_LEVEL;  // Compression level 0 to 9
 #define MEM (U64(65536)<<level)
 int y=0;  // Last bit, 0 or 1, set by encoder
 bool brute = false, trainEXE = false, trainTXT = false, adaptive = false, skipRGB = false;
@@ -1630,7 +1647,7 @@ public:
     int target=y<<12;
     if(nx>0)
     for (int i=0; i<ncxt; ++i) {
-      int err=(target-pr[i]);
+      int err=target-pr[i];
       train(&tx[0], &wx[cxt[i]*N], nx, err*rates[i]);
       if (adaptive){
         U32 logErr = min(0xF,ilog2(abs(err)));
@@ -1678,7 +1695,7 @@ public:
       mp->update();
       for (int i=0; i<ncxt; ++i) {
         int dp=dot_product(&tx[0], &wx[cxt[i]*N], nx)>>5;
-        if(dp<-2047)dp=-2047;if(dp>2047)dp=2047;
+        if(dp<-2047)dp=-2047;else if(dp>2047)dp=2047;
         mp->add(dp);
         pr[i]=squash(dp);
       }
@@ -2244,12 +2261,12 @@ private:
   Array<U32*> ByteHistory;
   Array<U8*> BitState;
   Array<bool> HasHistory;
-  int index;
+  U32 index;
   U8 lastByte, bits, lastBit, bitPos;
   inline void Update() {
     switch (bitPos) {
       case 0: {
-        for (int i=0; i<index; i++) {
+        for (U32 i=0; i<index; i++) {
           *BitState[i] = nex(*BitState[i], lastBit);
           *ByteHistory[i] = ((*ByteHistory[i])<<8)|lastByte;
           BitState[i] = Table.Find(Contexts[i], i, true);
@@ -2259,7 +2276,7 @@ private:
         break;
       }
       case 2: case 5: {
-        for (int i=0; i<index; i++) {
+        for (U32 i=0; i<index; i++) {
           *BitState[i] = nex(*BitState[i], lastBit);
           BitState[i] = Table.Find(Contexts[i]+bits*1337, i, false);
         }
@@ -2267,7 +2284,7 @@ private:
       }
       default: {
         int k = (lastBit+1)<<((bitPos%3)-(bitPos<2));
-        for (int i=0; i<index; i++) {
+        for (U32 i=0; i<index; i++) {
           *BitState[i] = nex(*BitState[i], lastBit);
           BitState[i]+=k;
         }
@@ -2324,7 +2341,7 @@ public:
     bits = (bitPos>0)?bits*2+lastBit:1;
     Update();
 
-    for (int i=0; i<index; i++) {
+    for (U32 i=0; i<index; i++) {
       int state = *BitState[i];
       result+=(state>0);
       int p1 = Maps8b[i]->p(state);
@@ -2354,6 +2371,244 @@ public:
     return result;
   }
 };
+
+class ContextMap2 {
+  const int C;  // max number of contexts
+  class E {  // hash element, 64 bytes
+    U16 chk[7];  // byte context checksums
+    U8 last;     // last 2 accesses (0-6) in low, high nibble
+  public:
+    U8 bh[7][7]; // byte context, 3-bit context -> bit history state
+                 // bh[][0] = 1st bit, bh[][1,2] = 2nd bit, bh[][3..6] = 3rd bit
+                 // bh[][0] is also a replacement priority, 0 = empty
+    U8* get(U16 chk);  // Find element (0-6) matching checksum.
+                       // If not found, insert or replace lowest priority (not last).
+  };
+  Array<E,64> t;  // bit histories for bits 0-1, 2-4, 5-7
+                  // For 0-1, also contains a run count in bh[][4] and value in bh[][5]
+                  // and pending update count in bh[7]
+  Array<U8*> cp;   // C pointers to current bit history
+  Array<U8*> cp0;  // First element of 7 element array containing cp[i]
+  Array<U32> cxt;  // C whole byte contexts (hashes)
+  Array<U8*> ByteHistory; // C [0..3] = count, value, unused, unused
+                   //StateMap *sm;    // C maps of state -> p
+  Array<bool> HasHistory;
+  StateMap **Maps6b, **Maps8b, **Maps12b;
+  int cn;          // Next context to set by set()
+  U8 bit, lastByte;
+public:
+  ContextMap2(int m, int c=1);  // m = memory in bytes, a power of 2, C = c
+  ~ContextMap2();
+  void Train(U8 B);
+  void set(U32 cx, int next=-1);   // set next whole byte context to cx; if "next" is 0 then set order does not matter
+  int mix(Mixer& m);
+};
+
+// Find or create hash element matching checksum ch
+inline U8* ContextMap2::E::get(U16 ch) {
+  if (chk[last&15]==ch) return &bh[last&15][0];
+  int b=0xffff, bi=0;
+  for (int i=0; i<7; ++i) {
+    if (chk[i]==ch) return last=last<<4|i, (U8*)&bh[i][0];
+    int pri=bh[i][0];
+    if (pri<b && (last&15)!=i && last>>4!=i) b=pri, bi=i;
+  }
+  return last=0xf0|bi, chk[bi]=ch, (U8*)memset(&bh[bi][0], 0, 7);
+}
+
+// Construct using m bytes of memory for c contexts
+ContextMap2::ContextMap2(int m, int c): C(c), t(m>>6), cp(c), cp0(c),
+cxt(c), ByteHistory(c), HasHistory(c), cn(0) {
+  assert(m>=64 && (m&(m-1))==0);  // power of 2?
+  assert(sizeof(E)==64);
+  Maps6b = new StateMap*[C];
+  Maps8b = new StateMap*[C];
+  Maps12b = new StateMap*[C];
+  for (int i=0; i<C; ++i) {
+    Maps6b[i] = new StateMap((1<<6)+8);
+    Maps8b[i] = new StateMap(1<<8);
+    Maps12b[i] = new StateMap((1<<12)+(1<<9));
+    cp0[i]=cp[i]=&t[0].bh[0][0];
+    ByteHistory[i]=cp[i]+3;
+  }
+  bit=lastByte=0;
+}
+
+ContextMap2::~ContextMap2() {
+  for (U32 i=0; i<C; i++) {
+    delete Maps6b[i];
+    delete Maps8b[i];
+    delete Maps12b[i];
+  }
+  delete[] Maps6b;
+  delete[] Maps8b;
+  delete[] Maps12b;
+}
+
+// Set the i'th context to cx
+inline void ContextMap2::set(U32 cx, int next) {
+  int i=cn++;
+  i&=next;
+  assert(i>=0 && i<C);
+  cx=cx*987654323+i;  // permute (don't hash) cx to spread the distribution
+  cx=cx<<16|cx>>16;
+  cxt[i]=cx*123456791+i;
+}
+
+void ContextMap2::Train(U8 B){
+  U8 bits = 1;
+  U64 tmask=t.size()-1;
+  for (int k=0;k<8;k++){
+    for (int i=0; i<cn; ++i){
+      if (cp[i])
+        *cp[i]=nex(*cp[i], bit);
+
+      // Update context pointers
+      if (k>1 && ByteHistory[i][0]==0)
+        cp[i]=0;
+      else
+      {
+        U16 chksum=cxt[i]>>16;
+        switch(k)
+        {
+          case 1: case 3: case 6: cp[i]=cp0[i]+1+(bits&1); break;
+          case 4: case 7: cp[i]=cp0[i]+3+(bits&3); break;
+          case 2: case 5: cp0[i]=cp[i]=t[(cxt[i]+bits)&tmask].get(chksum); break;
+          default:
+          {
+            cp0[i]=cp[i]=t[(cxt[i]+bits)&tmask].get(chksum);
+            // Update pending bit histories for bits 2-7
+            if (cp0[i][3]==2) {
+              const int c=cp0[i][4]+256;
+              U8 *p=t[(cxt[i]+(c>>6))&tmask].get(chksum);
+              p[0]=1+((c>>5)&1);
+              p[1+((c>>5)&1)]=1+((c>>4)&1);
+              p[3+((c>>4)&3)]=1+((c>>3)&1);
+              p=t[(cxt[i]+(c>>3))&tmask].get(chksum);
+              p[0]=1+((c>>2)&1);
+              p[1+((c>>2)&1)]=1+((c>>1)&1);
+              p[3+((c>>1)&3)]=1+(c&1);
+              cp0[i][6]=0;
+            }
+            // Update run count of previous context
+            ByteHistory[i][3] = ByteHistory[i][2];
+            ByteHistory[i][2] = ByteHistory[i][1];
+            if (ByteHistory[i][0]==0)  // new context
+              ByteHistory[i][0]=2, ByteHistory[i][1]=lastByte;
+            else if (ByteHistory[i][1]!=lastByte)  // different byte in context
+              ByteHistory[i][0]=1, ByteHistory[i][1]=lastByte;
+            else if (ByteHistory[i][0]<254)  // same byte in context
+              ByteHistory[i][0]+=2;
+            else if (ByteHistory[i][0]==255)
+              ByteHistory[i][0]=128;
+            ByteHistory[i]=cp0[i]+3;
+          } break;
+        }
+      }
+    }
+    bit = (B>>(7-k))&1;
+    bits+=bits + bit;
+  }
+  cn=0;
+  lastByte=B;
+}
+
+// Update the model with bit y, and predict next bit to mixer m.
+int ContextMap2::mix(Mixer& m) {
+  // Update model with y
+  U8 c1=buf(1);
+  int result=0;
+  U64 tmask=t.size()-1; 
+  for (int i=0; i<cn; ++i) {
+    if (cp[i]) {
+      assert(cp[i]>=&t[0].bh[0][0] && cp[i]<=&t[t.size()-1].bh[6][6]);
+      assert((uintptr_t(cp[i])&63)>=15);
+      *cp[i]=nex(*cp[i], y);
+    }
+
+    // Update context pointers
+    if (bpos>1 && ByteHistory[i][0]==0)
+      cp[i]=0;
+    else
+    {
+      U16 chksum=cxt[i]>>16;     
+      switch(bpos)
+      {
+        case 1: case 3: case 6: cp[i]=cp0[i]+1+(c0&1); break;
+        case 4: case 7: cp[i]=cp0[i]+3+(c0&3); break;
+        case 2: case 5: cp0[i]=cp[i]=t[(cxt[i]+c0)&tmask].get(chksum); break;
+        default:
+        {
+          cp0[i]=cp[i]=t[(cxt[i]+c0)&tmask].get(chksum);
+          // Update pending bit histories for bits 2-7
+          if (cp0[i][3]==2) {
+            const int c=cp0[i][4]+256;
+            U8 *p=t[(cxt[i]+(c>>6))&tmask].get(chksum);
+            p[0]=1+((c>>5)&1);
+            p[1+((c>>5)&1)]=1+((c>>4)&1);
+            p[3+((c>>4)&3)]=1+((c>>3)&1);
+            p=t[(cxt[i]+(c>>3))&tmask].get(chksum);
+            p[0]=1+((c>>2)&1);
+            p[1+((c>>2)&1)]=1+((c>>1)&1);
+            p[3+((c>>1)&3)]=1+(c&1);
+            cp0[i][6]=0;
+          }
+          ByteHistory[i][3] = ByteHistory[i][2];
+          ByteHistory[i][2] = ByteHistory[i][1];
+          // Update byte history of previous context
+          if (ByteHistory[i][0]==0)  // new context
+            ByteHistory[i][0]=2, ByteHistory[i][1]=c1;
+          else if (ByteHistory[i][1]!=c1)  // different byte in context
+            ByteHistory[i][0]=1, ByteHistory[i][1]=c1;
+          else if (ByteHistory[i][0]<254)  // same byte in context
+            ByteHistory[i][0]+=2;
+          else if (ByteHistory[i][0]==255)
+            ByteHistory[i][0]=128;
+          ByteHistory[i]=cp0[i]+3;
+          HasHistory[i]=*cp0[i]>15;
+        } break;
+      }
+    }
+
+    // predict from last byte in context
+    if ((ByteHistory[i][1]+256)>>(8-bpos)==c0) {
+      int rc=ByteHistory[i][0];  // count*2, +1 if 2 different bytes seen
+      int sign=(ByteHistory[i][1]>>(7-bpos)&1)*2-1;  // predicted bit + for 1, - for 0
+      int c=ilog(rc+1)<<(2+(~rc&1));
+      m.add(sign*c);
+    }
+    else if (bpos>0 && (ByteHistory[i][0]&1)>0) {
+      if ((ByteHistory[i][2]+256)>>(8-bpos)==c0)
+        m.add((((ByteHistory[i][2]>>(7-bpos))&1)*2-1)*128);
+      else if (HasHistory[i] && (ByteHistory[i][3]+256)>>(8-bpos)==c0)
+        m.add((((ByteHistory[i][3]>>(7-bpos))&1)*2-1)*128);
+      else
+        m.add(0);
+    }
+    else
+      m.add(0); //p=0.5
+
+    // predict from bit context
+    int s = 0;
+    if (cp[i]) s = *cp[i];
+    mix2(m,s,*Maps8b[i]);
+  
+    if (s>0) result++;
+
+    int n0=-~nex(s, 2), n1=-~nex(s, 3), k = (n1*64)/(n1+n0);
+    if (HasHistory[i]) {
+      s  = (ByteHistory[i][1]>>(7-bpos))&1;
+      s |= ((ByteHistory[i][2]>>(7-bpos))&1)*2;
+      s |= ((ByteHistory[i][3]>>(7-bpos))&1)*4;
+    }
+    else
+      s = 8;
+    m.add(stretch(Maps12b[i]->p((s<<9)|(bpos<<6)|k))>>2);
+    m.add(stretch(Maps6b[i]->p((s<<3)|bpos))>>2);
+  }
+  if (bpos==7) cn=0;
+  return result;
+}
 
 // Context map for large contexts.  Most modeling uses this type of context
 // map.  It includes a built in RunContextMap to predict the last byte seen
@@ -2418,16 +2673,12 @@ class ContextMap {
   StateMap *sm;    // C maps of state -> p
   int cn;          // Next context to set by set()
   U8 bit, lastByte;
-  //void update(U32 cx, int c);  // train model that context cx predicts c
-  int mix1(Mixer& m, int cc, int bp, int c1, int y1);
-    // mix() with global context passed as arguments to improve speed.
 public:
   ContextMap(int m, int c=1);  // m = memory in bytes, a power of 2, C = c
   ~ContextMap();
   void Train(U8 B);
-  void set(U32 cx, int next=-1);   // set next whole byte context to cx
-    // if next is 0 then set order does not matter
-  int mix(Mixer& m) {return mix1(m, c0, bpos, buf(1), y);}
+  void set(U32 cx, int next=-1);   // set next whole byte context to cx; if "next" is 0 then set order does not matter
+  int mix(Mixer& m);
 };
 
 // Find or create hash element matching checksum ch
@@ -2525,21 +2776,16 @@ void ContextMap::Train(U8 B){
   lastByte=B;
 }
 
-// Update the model with bit y1, and predict next bit to mixer m.
-// Context: cc=c0, bp=bpos, c1=buf(1), y1=y.
-int ContextMap::mix1(Mixer& m, int cc, int bp, int c1, int y1) {
-
+// Update the model with bit y, and predict next bit to mixer m.
+int ContextMap::mix(Mixer& m) {
   // Update model with y
+  U8 c1=buf(1);
   int result=0;
   for (int i=0; i<cn; ++i) {
     if (cp[i]) {
       assert(cp[i]>=&t[0].bh[0][0] && cp[i]<=&t[t.size()-1].bh[6][6]);
-      #ifdef X64
-      assert(((U64)(cp[i])&63)>=15);
-      #else
-      assert((long(cp[i])&63)>=15);
-      #endif
-      int ns=nex(*cp[i], y1);
+      assert((uintptr_t(cp[i])&63)>=15);
+      int ns=nex(*cp[i], y);
       if (ns>=204 && rnd() << ((452-ns)>>3)) ns-=4;  // probabilistic increment
       *cp[i]=ns;
     }
@@ -2552,44 +2798,44 @@ int ContextMap::mix1(Mixer& m, int cc, int bp, int c1, int y1) {
       U16 chksum=cxt[i]>>16;
       U64 tmask=t.size()-1; 
       switch(bpos)
-     {
-      case 1: case 3: case 6: cp[i]=cp0[i]+1+(cc&1); break;
-      case 4: case 7: cp[i]=cp0[i]+3+(cc&3); break;
-      case 2: case 5: cp0[i]=cp[i]=t[(cxt[i]+cc)&tmask].get(chksum); break;
-      default:
       {
-       cp0[i]=cp[i]=t[(cxt[i]+cc)&tmask].get(chksum);
-       // Update pending bit histories for bits 2-7
-       if (cp0[i][3]==2) {
-         const int c=cp0[i][4]+256;
-         U8 *p=t[(cxt[i]+(c>>6))&tmask].get(chksum);
-         p[0]=1+((c>>5)&1);
-         p[1+((c>>5)&1)]=1+((c>>4)&1);
-         p[3+((c>>4)&3)]=1+((c>>3)&1);
-         p=t[(cxt[i]+(c>>3))&tmask].get(chksum);
-         p[0]=1+((c>>2)&1);
-         p[1+((c>>2)&1)]=1+((c>>1)&1);
-         p[3+((c>>1)&3)]=1+(c&1);
-         cp0[i][6]=0;
-       }
-       // Update run count of previous context
-       if (runp[i][0]==0)  // new context
-         runp[i][0]=2, runp[i][1]=c1;
-       else if (runp[i][1]!=c1)  // different byte in context
-         runp[i][0]=1, runp[i][1]=c1;
-       else if (runp[i][0]<254)  // same byte in context
-         runp[i][0]+=2;
-       else if (runp[i][0]==255)
-         runp[i][0]=128;
-       runp[i]=cp0[i]+3;
-      } break;
-     }
+        case 1: case 3: case 6: cp[i]=cp0[i]+1+(c0&1); break;
+        case 4: case 7: cp[i]=cp0[i]+3+(c0&3); break;
+        case 2: case 5: cp0[i]=cp[i]=t[(cxt[i]+c0)&tmask].get(chksum); break;
+        default:
+        {
+          cp0[i]=cp[i]=t[(cxt[i]+c0)&tmask].get(chksum);
+          // Update pending bit histories for bits 2-7
+          if (cp0[i][3]==2) {
+            const int c=cp0[i][4]+256;
+            U8 *p=t[(cxt[i]+(c>>6))&tmask].get(chksum);
+            p[0]=1+((c>>5)&1);
+            p[1+((c>>5)&1)]=1+((c>>4)&1);
+            p[3+((c>>4)&3)]=1+((c>>3)&1);
+            p=t[(cxt[i]+(c>>3))&tmask].get(chksum);
+            p[0]=1+((c>>2)&1);
+            p[1+((c>>2)&1)]=1+((c>>1)&1);
+            p[3+((c>>1)&3)]=1+(c&1);
+            cp0[i][6]=0;
+          }
+          // Update run count of previous context
+          if (runp[i][0]==0)  // new context
+            runp[i][0]=2, runp[i][1]=c1;
+          else if (runp[i][1]!=c1)  // different byte in context
+            runp[i][0]=1, runp[i][1]=c1;
+          else if (runp[i][0]<254)  // same byte in context
+            runp[i][0]+=2;
+          else if (runp[i][0]==255)
+            runp[i][0]=128;
+          runp[i]=cp0[i]+3;
+        } break;
+      }
     }
 
     // predict from last byte in context
-    if ((runp[i][1]+256)>>(8-bp)==cc) {
+    if ((runp[i][1]+256)>>(8-bpos)==c0) {
       int rc=runp[i][0];  // count*2, +1 if 2 different bytes seen
-      int sign=(runp[i][1]>>(7-bp)&1)*2-1;  // predicted bit + for 1, - for 0
+      int sign=(runp[i][1]>>(7-bpos)&1)*2-1;  // predicted bit + for 1, - for 0
       int c=ilog(rc+1)<<(2+(~rc&1));
       m.add(sign*c);
     }
@@ -2604,7 +2850,7 @@ int ContextMap::mix1(Mixer& m, int cc, int bp, int c1, int y1) {
     if(s>0)result++;
 
   }
-  if (bp==7) cn=0;
+  if (bpos==7) cn=0;
   return result;
 }
 
@@ -3346,7 +3592,7 @@ public:
 
 //////////////////////////// matchModel ///////////////////////////
 
-// matchModel() finds the longest matching context and returns its length
+// matchModel() finds the most recent matching context and returns its max length
 
 int matchModel(Mixer& m) {
   const int MAXLEN=65534;  // longest allowed match + 1
@@ -3368,7 +3614,7 @@ int matchModel(Mixer& m) {
     }
     t[h]=pos;  // update hash table
     result=len;
-//    if (result>0 && !(result&0xfff)) printf("pos=%d len=%d ptr=%d\n", pos, len, ptr);
+//    if (result>0 && !(result&0xffff)) printf("pos=%d len=%d ptr=%d\n", pos, len, ptr);
     scm1.set(pos);
   }
 
@@ -3958,37 +4204,37 @@ void im24bitModel(Mixer& m, int info, int alpha=0, int isPNG=0) {
       else
         color=(padding>0)*(stride+1);
 
-      if (isPNG) {
+      if (isPNG){
         U8 B = c4 & 0xFF;
-        switch (filter) {
+        switch (filter){
         case 1: {
-          buffer.Add((U8)(B + buffer(stride)*(x > stride + 1 || !x)));
-          filterOn = x > stride;
+          buffer.Add((U8)( B + buffer(stride)*(x>stride+1 || !x) ) );
+          filterOn = x>stride;
           px = buffer(stride);
           break;
         }
         case 2: {
-          buffer.Add((U8)(B + buffer(w)*(filterOn = (line > 0))));
+          buffer.Add((U8)( B + buffer(w)*(filterOn=(line>0)) ) );
           px = buffer(w);
           break;
         }
         case 3: {
-          buffer.Add((U8)(B + (buffer(w)*(line > 0) + buffer(stride)*(x > stride + 1 || !x)) / 2));
-          filterOn = (x > stride || line > 0);
-          px = (buffer(stride)*(x > stride) + buffer(w)*(line > 0)) / 2;
+          buffer.Add((U8)( B + (buffer(w)*(line>0) + buffer(stride)*(x>stride+1 || !x))/2 ) );
+          filterOn = (x>stride || line>0);
+          px = (buffer(stride)*(x>stride)+buffer(w)*(line>0))/2;
           break;
         }
         case 4: {
-          buffer.Add((U8)(B + Paeth(buffer(stride)*(x > stride + 1 || !x), buffer(w)*(line > 0), buffer(w + stride)*(line > 0 && (x > stride + 1 || !x)))));
-          filterOn = (x > stride || line > 0);
-          px = Paeth(buffer(stride)*(x > stride), buffer(w)*(line > 0), buffer(w + stride)*(x > stride && line > 0));
+          buffer.Add((U8)( B + Paeth(buffer(stride)*(x>stride+1 || !x), buffer(w)*(line>0), buffer(w+stride)*(line>0 && (x>stride+1 || !x))) ) );
+          filterOn = (x>stride || line>0);
+          px = Paeth(buffer(stride)*(x>stride),buffer(w)*(line>0),buffer(w+stride)*(x>stride && line>0));
           break;
         }
         default: buffer.Add(B);
           filterOn = false;
           px = 0;
         }
-        if (!filterOn)px = 0;
+        if (!filterOn)px=0;
       }
       else
         buffer.Add(c4 & 0xFF);
@@ -5387,7 +5633,6 @@ inline int X2(int i) {
 void wavModel(Mixer& m, int info, ModelStats *Stats = NULL) {
   static int col=0;
   static Array<int> pr{3*2}; // [3][2]
-  static Array<int> n{2};
   static Array<int> counter{2};
   static Array<double> F{49*49*2}; //[49][49][2]
   static Array<double> L{49*49}; //[49][49]
@@ -5416,7 +5661,7 @@ void wavModel(Mixer& m, int info, ModelStats *Stats = NULL) {
       }
     for (int chn=0; chn<channels; chn++) {
       F_(1,0,chn)=1.0;
-      n[chn]=counter[chn]=pr_(2,chn)=pr_(1,chn)=pr_(0,chn)=0;
+      counter[chn]=pr_(2,chn)=pr_(1,chn)=pr_(0,chn)=0;
     }
   }
   // Select previous samples and predicted sample as context
@@ -5441,37 +5686,34 @@ void wavModel(Mixer& m, int info, ModelStats *Stats = NULL) {
         z6=2*X1(1)-X1(2); 
         z7=X1(1);
       }
-      n[chn]++;
-      if (n[chn]==(256>>level)) {
-        if (channels==1) for (k=1; k<=S+D; k++) for (l=k; l<=S+D; l++) F_(k,l,chn)=(F_(k-1,l-1,chn)-X1(k)*X1(l))*a2;
-        else for (k=1; k<=S+D; k++) if (k!=S+1) for (l=k; l<=S+D; l++) if (l!=S+1) F_(k,l,chn)=(F_(k-1,l-1,chn)-(k-1<=S?X1(k):X2(k-S))*(l-1<=S?X1(l):X2(l-S)))*a2;
-        for (i=1; i<=S+D; i++) {
-           sum=F_(i,i,chn);
-           for (k=1; k<i; k++) sum-=L_(i,k)*L_(i,k);
-           sum=floor(sum+0.5);
-           sum=1.0/sum;
-           if (sum>0.0) {
-             L_(i,i)=sqrt(sum);
-             for (j=(i+1); j<=S+D; j++) {
-               sum=F_(i,j,chn);
-               for (k=1; k<i; k++) sum-=L_(j,k)*L_(i,k);
-               sum=floor(sum+0.5);
-               L_(j,i)=sum*L_(i,i);
-             }
-           } else break;
+
+      if (channels==1) for (k=1; k<=S+D; k++) for (l=k; l<=S+D; l++) F_(k,l,chn)=(F_(k-1,l-1,chn)-X1(k)*X1(l))*a2;
+      else for (k=1; k<=S+D; k++) if (k!=S+1) for (l=k; l<=S+D; l++) if (l!=S+1) F_(k,l,chn)=(F_(k-1,l-1,chn)-(k-1<=S?X1(k):X2(k-S))*(l-1<=S?X1(l):X2(l-S)))*a2;
+      for (i=1; i<=S+D; i++) {
+          sum=F_(i,i,chn);
+          for (k=1; k<i; k++) sum-=L_(i,k)*L_(i,k);
+          sum=floor(sum+0.5);
+          sum=1.0/sum;
+          if (sum>0.0) {
+            L_(i,i)=sqrt(sum);
+            for (j=(i+1); j<=S+D; j++) {
+              sum=F_(i,j,chn);
+              for (k=1; k<i; k++) sum-=L_(j,k)*L_(i,k);
+              sum=floor(sum+0.5);
+              L_(j,i)=sum*L_(i,i);
+            }
+          } else break;
+      }
+      if (i>S+D && counter[chn]>S+1) {
+        for (k=1; k<=S+D; k++) {
+          F_(k,0,chn)=F_(0,k,chn);
+          for (j=1; j<k; j++) F_(k,0,chn)-=L_(k,j)*F_(j,0,chn);
+          F_(k,0,chn)*=L_(k,k);
         }
-        if (i>S+D && counter[chn]>S+1) {
-          for (k=1; k<=S+D; k++) {
-            F_(k,0,chn)=F_(0,k,chn);
-            for (j=1; j<k; j++) F_(k,0,chn)-=L_(k,j)*F_(j,0,chn);
-            F_(k,0,chn)*=L_(k,k);
-          }
-          for (k=S+D; k>0; k--) {
-            for (j=k+1; j<=S+D; j++) F_(k,0,chn)-=L_(j,k)*F_(j,0,chn);
-            F_(k,0,chn)*=L_(k,k);
-          }
+        for (k=S+D; k>0; k--) {
+          for (j=k+1; j<=S+D; j++) F_(k,0,chn)-=L_(j,k)*F_(j,0,chn);
+          F_(k,0,chn)*=L_(k,k);
         }
-        n[chn]=0;
       }
       sum=0.0;
       for (l=1; l<=S+D; l++) sum+=F_(l,0,chn)*(l<=S?X1(l):X2(l-S));
@@ -7034,7 +7276,7 @@ void XMLModel(Mixer& m, ModelStats *Stats = NULL){
 // This combines all the context models with a Mixer.
 
 class ContextModel{
-  ContextMapB64 cm;
+  ContextMap2 cm;
   exeModel exeModel1;
   RunContextMap rcm7, rcm9, rcm10;
   Mixer m;
@@ -7044,8 +7286,8 @@ class ContextModel{
   void UpdateContexts(U8 B);
   void Train();
 public:
-  ContextModel() : cm(MEM*32, 9), rcm7(MEM), rcm9(MEM), rcm10(MEM), m(1000, 4096+(1024+512+1024*3)*(level>=4), 7+5*(level>=4)), ft2(DEFAULT), filetype(DEFAULT), blocksize(0), blockinfo(0){
-    memset(&cxt, 0, 16*sizeof(U32));
+  ContextModel() : cm(MEM*32, 9), rcm7(MEM), rcm9(MEM), rcm10(MEM), m(1016, 4096+(1024+512+1024*3)*(level>=4), 7+5*(level>=4)), ft2(DEFAULT), filetype(DEFAULT), blocksize(0), blockinfo(0){
+    memset(&cxt[0], 0, sizeof(cxt));
     if (trainTXT) Train();
   }
   int Predict(ModelStats *Stats = NULL);
@@ -7074,7 +7316,7 @@ void ContextModel::Train(){
         printf(" done [%d bytes]\n",pos);
         f.close();
         pos=0;
-        memset(&cxt[0], 0, 16*sizeof(U32));
+        memset(&cxt[0], 0, sizeof(cxt));
         memset(&buf[0], 0, buf.size());
       }
     }
@@ -7114,7 +7356,7 @@ int ContextModel::Predict(ModelStats *Stats){
   m.add(256); //network bias
 
   // Test for special block types
-  int ismatch=ilog(matchModel(m));  // Length of longest matching context
+  int matchlength=ilog(matchModel(m));  // ilog of length of most recent match (0..255)
   if (filetype==IMAGE1) im1bitModel(m, blockinfo);
   if (filetype==IMAGE4) return im4bitModel(m, blockinfo), m.p();
   if (filetype==IMAGE8) return im8bitModel(m, blockinfo), m.p();
@@ -7142,7 +7384,7 @@ int ContextModel::Predict(ModelStats *Stats){
   rcm10.mix(m);
 
   if (level>=4 && filetype!=IMAGE1) {
-    sparseModel(m,ismatch,order);
+    sparseModel(m,matchlength,order);
     distanceModel(m);
     recordModel(m, filetype, Stats);
     wordModel(m, filetype);
@@ -7158,19 +7400,19 @@ int ContextModel::Predict(ModelStats *Stats){
 
   U32 c1=buf(1), c2=buf(2), c3=buf(3), c;
 
-  m.set(8+ c1 + (bpos>5)*256 + ( ((c0&((1<<bpos)-1))==0) || (c0==((2<<bpos)-1)) )*512, 8+1024);
+  m.set(8+(c1 | (bpos>5)<<8 |  ( ((c0&((1<<bpos)-1))==0) || (c0==((2<<bpos)-1)) )<<9), 8+1024);
   m.set(c0, 256);
-  m.set(order+8*(c4>>6&3)+32*(bpos==0)+64*(c1==c2)+128*(filetype==EXE), 256);
+  m.set(order | ((c4>>6)&3)<<3 | (bpos==0)<<5 | (c1==c2)<<6 | (filetype==EXE)<<7, 256);
   m.set(c2, 256);
   m.set(c3, 256);
-  m.set(ismatch, 256);
+  m.set(matchlength, 256);
 
   if (bpos!=0)
   {
-    c=c0<<(8-bpos); if (bpos==1)c+=c3/2;
-    c=(min(bpos,5))*256+c1/32+8*(c2/32)+(c&192);
+    c=c0<<(8-bpos); if (bpos==1)c|=c3>>1;
+    c=min(bpos,5)<<8 | c1>>5 | (c2>>5)<<3 | (c&192);
   }
-  else c=c3/128+(c4>>31)*2+4*(c2/64)+(c1&240);
+  else c=c3>>7 | (c4>>31)<<1 | (c2>>6)<<2 | (c1&240);
   m.set(c, 1536);
   int pr=m.p();
   return pr;
@@ -7591,8 +7833,8 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
   // For image detection
   static int deth=0,detd=0;  // detected header/data size in bytes
   static Filetype dett;  // detected block type
-  if (deth) return in->setpos(start+deth),deth=0,dett;
-  else if (detd) return in->setpos(start+detd),detd=0,DEFAULT;
+  if (deth) {in->setpos(start+deth);deth=0;return dett;}
+  else if (detd) {in->setpos(start+detd);detd=0;return DEFAULT;}
 
   for (int i=0; i<n; ++i) {
     int c=in->getc();
@@ -8471,7 +8713,7 @@ int encode_zlib(File *in, File *out, U64 len, int &hdrsize) {
             if (++diffCount[j]<LIMIT) {
               const int p=j*LIMIT+diffCount[j];
               diffPos[p]=i+k-BLOCK;
-              assert(k < sizeof(zin)/sizeof(*zin));
+              assert(k < int(sizeof(zin)/sizeof(*zin)));
               diffByte[p]=zin[k];
             }
           }
@@ -9213,7 +9455,7 @@ int main(int argc, char** argv) {
     bool doList=false;  // -l option
     int l=0;
     if (argc>1 && argv[1][0]=='-' && argv[1][1] && (!argv[1][2] || (argv[1][2]=='[' && (l=(int)strlen(argv[1]))>3 && argv[1][l-1]==']'))) {
-      if (argv[1][1]>='0' && argv[1][1]<='8'){
+      if (argv[1][1]>='0' && argv[1][1]<='9'){
         level=argv[1][1]-'0';
         l-=2;
         while (l>2){
@@ -9233,7 +9475,7 @@ int main(int argc, char** argv) {
       else if ((argv[1][1]&0xDF)=='L' && !argv[1][2])
         doList=true;
       else
-        quit("Valid options are -0[switches] through -8[switches], -d, -l\n");
+        quit("Valid options are -0[switches] through -9[switches], -d, -l\n");
       --argc;
       ++argv;
       pause=false;
@@ -9253,8 +9495,8 @@ int main(int argc, char** argv) {
         "To compress:\n"
         "  " PROGNAME " -level[switches] file               (compresses to file." PROGNAME ")\n"
         "  " PROGNAME " file                      (level -%d, pause when done)\n"
-        "level: -0 = store, -1 -2 -3 = faster (uses 35, 48, 59 MB)\n"
-        "-4 -5 -6 -7 -8 = smaller (uses 133, 233, 435, 837, 1643 MB)\n"
+        "level: -0 = store, -1 -2 -3 = faster (uses 39, 45, 57 MB)\n"
+        "-4 -5 -6 -7 -8 -9 = smaller (uses 147, 250, 457, 870, 1696, 3348 MB)\n"
         "Optional switches:\nb = Brute-force detection of DEFLATE streams\n"
         "e = Pre-train x86/x64 model\nt = Pre-train main model with dictionary file (english.dic)\n"
         "a = Adaptive learning rate\ns = Skip the color transform, just reorder the RGB channels\n"
@@ -9350,11 +9592,11 @@ int main(int argc, char** argv) {
         printf("%s: not a %s file\n", archiveName.c_str(), PROGNAME), quit();
       level=header[(int)strlen(PROGNAME)+1];
       trainEXE = (level&0x10)!=0; trainTXT = (level&0x20)!=0; adaptive = (level&0x40)!=0; skipRGB = (level&0x80)!=0; level&=0xF;
-      if (level<0||level>8) level=DEFAULT_LEVEL;
+      if (level<0||level>9) level=DEFAULT_LEVEL;
     }
 
     // Set globals according to option
-    assert(level>=0 && level<=8);
+    assert(level>=0 && level<=9);
     buf.setsize(MEM*8);
     Encoder en(mode, archive);
 
