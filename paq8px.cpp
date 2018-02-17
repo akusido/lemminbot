@@ -1,4 +1,4 @@
-﻿/* paq8px file compressor/archiver.  Released on January 18, 2018
+/* paq8px file compressor/archiver.  Released on February 11, 2018
 
     Copyright (C) 2008 Matt Mahoney, Serge Osnach, Alexander Ratushnyak,
     Bill Pettis, Przemyslaw Skibinski, Matthew Fite, wowtiger, Andrew Paterson,
@@ -599,7 +599,7 @@ Added gif recompression
 //Change the following values on a new build if applicable
 
 #define PROGNAME     "paq8px"  // Change this if you make a branch
-#define PROGVERSION  "130"
+#define PROGVERSION  "136"
 #define PROGYEAR     "2018"
 
 #define DEFAULT_LEVEL 5
@@ -613,8 +613,8 @@ Added gif recompression
 #define WINDOWS  //to compile for Windows
 #endif
 
-#if defined(unix) || defined(__unix__) || defined(__unix)
-#define UNIX //to compile for Unix, Linux, Solairs, MacOS / Darwin, etc)
+#if defined(unix) || defined(__unix__) || defined(__unix) || defined(__APPLE__)
+#define UNIX //to compile for Unix, Linux, Solaris, MacOS / Darwin, etc)
 #endif
 
 #if !defined(WINDOWS ) && !defined(UNIX)
@@ -623,23 +623,34 @@ Added gif recompression
 
 //////////////////////// Includes /////////////////////////////////////////
 
+// Determining the proper printf() format specifier for 64 bit unsigned integers:
+// - on Windows MSVC and MinGW-w64 use the MSVCRT runtime where it is "%I64u"
+// - on Linux it is "%llu"
+// The correct value is provided by the PRIu64 macro which is defined here:
+#include <cinttypes>
+
+// Platform specific includes
 #ifdef UNIX
-#include <sys/types.h>
-#include <dirent.h>
-#include <errno.h>
+#include <dirent.h> //opendir(), readdir(), dirent()
+#include <string.h> //strlen(), strcpy(), strcat(), strerror(), memset(), memcpy(), memmove()
+#include <limits.h> // PATH_MAX
+#include <errno.h> // errno
 #else
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <time.h> //clock_t, CLOCKS_PER_SEC
 #endif
 
-#include <sys/stat.h>
-#include <stdio.h>
-#include <time.h>
-#include <math.h>
+#include <sys/stat.h> //stat(), mkdir(), stat()
+#include <math.h> //floor(), sqrt()
+#include <stdexcept> //std::exception
 
 #include <zlib.h>
+
+
+//////////////////////// Cross platform definitions /////////////////////////////////////////
 
 #if defined(__x86_64) || defined(_M_X64)
 #define X64
@@ -652,8 +663,6 @@ Added gif recompression
 #define __SSE2__
 #endif
 #endif
-
-//////////////////////// Cross platform definitions /////////////////////////////////////////
 
 #ifdef _MSC_VER  
 #define fseeko(a,b,c) _fseeki64(a,b,c)
@@ -684,9 +693,14 @@ typedef signed char        int8_t;
 inline int min(int a, int b) {return a<b?a:b;}
 inline int max(int a, int b) {return a<b?b:a;}
 
+// A basic exception class to let catch() in main() know 
+// that the exception was thrown intentionally.
+class IntentionalException : public std::exception {};
+
 // Error handler: print message if any, and exit
-void quit(const char* message=0) {
-  throw message;
+void quit(const char* const message=0) {
+  if(message)printf("%s\n",message);
+  throw IntentionalException();
 }
 
 // strings are equal ignoring case?
@@ -703,6 +717,24 @@ int equals(const char* a, const char* b) {
   }
   return *a==*b;
 }
+
+#ifndef NDEBUG
+  #if defined(UNIX)
+    #include <execinfo.h>
+    #define BACKTRACE() {\
+      void* callstack[128]; \
+      int frames = backtrace(callstack, 128); \
+      char** strs = backtrace_symbols(callstack, frames); \
+      for(int i = 0; i < frames; ++i) { \
+        printf("%s\n", strs[i]); \
+      } \
+      free(strs); \
+    }
+  #else
+    // TODO: How to implement this on Windows?
+    #define BACKTRACE() {}
+  #endif
+#endif
 
 //////////////////////// Program Checker /////////////////////
 
@@ -732,7 +764,7 @@ public:
     assert(sizeof(int)==4);
   }
   void print() const {  // Print elapsed time and used memory
-      printf("Time %1.2f sec, used %I64u MB (%I64u bytes) of memory\n",double(clock()-start_time)/CLOCKS_PER_SEC,maxmem>>20,maxmem);
+      printf("Time %1.2f sec, used %" PRIu64 " MB (%" PRIu64 " bytes) of memory\n",double(clock()-start_time)/CLOCKS_PER_SEC,maxmem>>20,maxmem);
   }
   ~ProgramChecker()
   {
@@ -758,7 +790,8 @@ public:
 static void chkindex(U64 index, U64 upper_bound)
 {
   if (index>=upper_bound) {
-    fprintf(stderr, "%I64u out of upper bound %I64u\n", index, upper_bound);
+    fprintf(stderr, "%" PRIu64 " out of upper bound %" PRIu64 "\n", index, upper_bound);
+    BACKTRACE();
     quit();
   }
 }
@@ -828,7 +861,7 @@ template<class T, const int Align> void Array<T,Align>::resize(U64 new_size) {
     assert(old_ptr && old_data);
     memcpy(data, old_data, sizeof(T)*old_size);
   }
-  if(old_ptr)free(old_ptr);
+  if(old_ptr){free(old_ptr);old_ptr=0;}
 }
 
 template<class T, const int Align> void Array<T,Align>::push_back(const T& x) {
@@ -949,16 +982,16 @@ FILE* maketmpfile(void) {
 class File {
 public:
   virtual ~File() = default;
-  virtual bool open(const char* filename, bool must_fail_on_error) = 0;
+  virtual bool open(const char* filename, bool must_succeed) = 0;
   virtual void create(const char* filename) = 0;
   virtual void close() = 0;
-  virtual int getc() = 0;
-  virtual void putc(U8 c) = 0;
-  void append(const char* s) {for (int i = 0; s[i]; i++)putc(s[i]);}
+  virtual int getchar() = 0;
+  virtual void putchar(U8 c) = 0;
+  void append(const char* s) {for (int i = 0; s[i]; i++)putchar(s[i]);}
   virtual U64 blockread(U8 *ptr, U64 count) = 0;
-  virtual U64 blockwrite(U8 *ptr, U64 count) = 0;
-  U32 get32(){return (getc() << 24) | (getc() << 16) | (getc() << 8) | (getc());}
-  void put32(U32 x){putc((x >> 24) & 255); putc((x >> 16) & 255); putc((x >> 8) & 255); putc(x & 255);}
+  virtual void blockwrite(U8 *ptr, U64 count) = 0;
+  U32 get32(){return (getchar() << 24) | (getchar() << 16) | (getchar() << 8) | (getchar());}
+  void put32(U32 x){putchar((x >> 24) & 255); putchar((x >> 16) & 255); putchar((x >> 8) & 255); putchar(x & 255);}
   virtual void setpos(U64 newpos) = 0;
   virtual void setend() = 0;
   virtual U64 curpos() = 0;
@@ -973,29 +1006,29 @@ protected:
   FILE *file;
 public:
   FileDisk() {file=0;}
-  bool open(const char *filename, bool must_fail_on_error) { 
+  bool open(const char *filename, bool must_succeed) { 
     assert(file==0); 
     file = fopen(filename, "rb"); 
     bool success=(file!=0);
-    if(!success && must_fail_on_error){printf("FileDisk: unable to open file %s (%s)\n", filename, strerror(errno));quit();}
+    if(!success && must_succeed){printf("Unable to open file %s (%s)\n", filename, strerror(errno));quit();}
     return success; 
   }
   void create(const char *filename) { 
     assert(file==0); 
     makedirectories(filename); 
     file=fopen(filename, "wb+");
-    if (!file) {printf("FileDisk: unable to create file %s (%s)\n", filename, strerror(errno));quit();} 
+    if (!file) {printf("Unable to create file %s (%s)\n", filename, strerror(errno));quit();} 
   }
   void createtmp() { 
     assert(file==0); 
     file = maketmpfile(); 
-    if (!file) {printf("FileDisk: unable to create temporary file (%s)\n", strerror(errno));quit();}
+    if (!file) {printf("Unable to create temporary file (%s)\n", strerror(errno));quit();}
   }
   void close() { if(file) fclose(file); file=0;}
-  int getc() { return fgetc(file); }
-  void putc(U8 c) { fputc(c, file); }
+  int getchar() { return fgetc(file); }
+  void putchar(U8 c) { fputc(c, file); }
   U64 blockread(U8 *ptr, U64 count) {return fread(ptr,1,count,file);}
-  U64 blockwrite(U8 *ptr, U64 count) {return fwrite(ptr,1,count,file);}
+  void blockwrite(U8 *ptr, U64 count) {fwrite(ptr,1,count,file);}
   void setpos(U64 newpos) { fseeko(file, newpos, SEEK_SET); }
   void setend() { fseeko(file, 0, SEEK_END); }
   U64 curpos() { return ftello(file); }
@@ -1027,33 +1060,37 @@ private:
   void forget_file_on_disk()
   {
     if (file_on_disk) {
-      (*file_on_disk).close(); 
+      file_on_disk->close(); 
       delete file_on_disk;
       file_on_disk = 0;
     }
   }
   //switch: ram->disk
+  #ifdef NDEBUG 
   const U32 MAX_RAM_FOR_TMP_CONTENT = 64 * 1024 * 1024; //64 MB (per file)
+  #else
+  const U32 MAX_RAM_FOR_TMP_CONTENT = 64; // to trigger switching to disk earlier - for testing
+  #endif
   void ram_to_disk()
   {
     assert(file_on_disk==0);
     file_on_disk = new FileDisk();
-    (*file_on_disk).createtmp();
+    file_on_disk->createtmp();
     if(filesize>0)
-      (*file_on_disk).blockwrite(&((*content_in_ram)[0]), filesize);
-    (*file_on_disk).setpos(filepos);
+      file_on_disk->blockwrite(&((*content_in_ram)[0]), filesize);
+    file_on_disk->setpos(filepos);
     forget_content_in_ram();
   }
 public:
   FileTmp() {content_in_ram=new Array<U8>(0); filepos=0; filesize=0; file_on_disk = 0;}
   ~FileTmp() {close();}
-  bool open(const char *filename, bool must_fail_on_error) { assert(false); return false; } //this method is forbidden for temporary files
+  bool open(const char *filename, bool must_succeed) { assert(false); return false; } //this method is forbidden for temporary files
   void create(const char *filename) { assert(false); } //this method is forbidden for temporary files
   void close() {
     forget_content_in_ram();
     forget_file_on_disk();
   }
-  int getc() {
+  int getchar() {
     if(content_in_ram)
     {
       if (filepos >= filesize)
@@ -1064,19 +1101,19 @@ public:
         return c; 
       }
     }
-    else return (*file_on_disk).getc();
+    else return file_on_disk->getchar();
   }
-  void putc(U8 c) {
+  void putchar(U8 c) {
     if(content_in_ram) {
       if (filepos < MAX_RAM_FOR_TMP_CONTENT) {
-        if (filepos == filesize) { (*content_in_ram).push_back(c); filesize++; }
+        if (filepos == filesize) { content_in_ram->push_back(c); filesize++; }
         else (*content_in_ram)[(U32)filepos] = c;
         filepos++;
         return;
       }
       else ram_to_disk();
     }
-    (*file_on_disk).putc(c);
+    file_on_disk->putchar(c);
   }
   U64 blockread(U8 *ptr, U64 count) {
     if(content_in_ram)
@@ -1087,40 +1124,92 @@ public:
       filepos += count;
       return count;
     }
-    else return (*file_on_disk).blockread(ptr,count);
+    else return file_on_disk->blockread(ptr,count);
   }
-  U64 blockwrite(U8 *ptr, U64 count) {
+  void blockwrite(U8 *ptr, U64 count) {
     if(content_in_ram) {
       if (filepos+count <= MAX_RAM_FOR_TMP_CONTENT) 
       { 
-        (*content_in_ram).resize((U32)(filepos + count));
+        content_in_ram->resize((U32)(filepos + count));
         if(count>0)memcpy(&((*content_in_ram)[(U32)filepos]), ptr, count);
         filesize += count;
         filepos += count;
-        return count;
+        return;
       }
       else ram_to_disk();
     }
-    return (*file_on_disk).blockwrite(ptr,count);
+    file_on_disk->blockwrite(ptr,count);
   }
   void setpos(U64 newpos) { 
     if(content_in_ram) {
-      if(newpos>filesize)ram_to_disk(); //panic: we don't support seeking past end of file - let's switch to disk
+      if(newpos>filesize)ram_to_disk(); //panic: we don't support seeking past end of file (but stdio does) - let's switch to disk
       else {filepos = newpos; return;}
     }  
-    (*file_on_disk).setpos(newpos);
+    file_on_disk->setpos(newpos);
   }
   void setend() { 
     if(content_in_ram) filepos = filesize;
-    else (*file_on_disk).setend();
+    else file_on_disk->setend();
   }
   U64 curpos() { 
     if(content_in_ram) return filepos;
-    else return (*file_on_disk).curpos();
+    else return file_on_disk->curpos();
   }
   bool eof() { 
     if(content_in_ram)return filepos >= filesize;
-    else return (*file_on_disk).eof();
+    else return file_on_disk->eof();
+  }
+};
+
+// Helper class: open a file from the executable's folder
+//
+
+static char mypatherror[]="Can't determine my path.";
+class OpenFromMyFolder {
+private:
+public:
+  //this static method will open the executable itself
+  static void myself(FileDisk *f) {
+  #ifdef WINDOWS
+    int i;
+    Array<char> myfilename(MAX_PATH+1);
+    if((i=GetModuleFileName(NULL, &myfilename[0], MAX_PATH)) && i<=MAX_PATH)
+  #endif
+  #ifdef UNIX
+    Array<char> myfilename(PATH_MAX+1);
+    if(readlink("/proc/self/exe", &myfilename[0], PATH_MAX)!=-1)
+  #endif
+      f->open(&myfilename[0],true);
+    else
+    {
+      strerror(errno);
+      quit(mypatherror);
+    }
+  }
+
+  //this static method will open a file from the executable's folder
+  static void anotherfile(FileDisk *f, const char* filename) {
+    int flength=(int)strlen(filename)+1;
+    #ifdef WINDOWS
+      int i;
+      Array<char> myfilename(MAX_PATH+flength);
+      if((i=GetModuleFileName(NULL, &myfilename[0], MAX_PATH)) && i<=MAX_PATH) {
+        char *endofpath=strrchr(&myfilename[0], '\\');
+    #endif
+    #ifdef UNIX
+      char myfilename[PATH_MAX+flength];
+      if(readlink("/proc/self/exe", myfilename, PATH_MAX)!=-1) {
+        char *endofpath=strrchr(&myfilename[0], '/');
+    #endif
+        if (endofpath==0)quit(mypatherror);
+        endofpath++;
+        strcpy(endofpath, filename); //append filename to my path
+        f->open(&myfilename[0],true);
+      }
+      else {
+        strerror(errno);
+        quit(mypatherror);
+      }
   }
 };
 
@@ -1566,30 +1655,70 @@ Stretch::Stretch(): t(4096) {
 // m.p() returns the output prediction that the next bit is 1 as a
 //   12 bit number (0 to 4095).
 
-#if defined(__SSE2__)
-#include <emmintrin.h>
+#define MIX_SIMD_WIDTH 8
+#if defined(__AVX2__)
+#include <immintrin.h>
+#undef MIX_SIMD_WIDTH
+#define MIX_SIMD_WIDTH 16
 
-static inline int dot_product (const short* const t, const short* const w, int n) {
-  __m128i sum = _mm_setzero_si128 ();
-  while ((n -= 8) >= 0) {
-    __m128i tmp = _mm_madd_epi16 (*(__m128i *) &t[n], *(__m128i *) &w[n]);
-    tmp = _mm_srai_epi32 (tmp, 8);
-    sum = _mm_add_epi32 (sum, tmp);
+static inline int dot_product(const short* const t, const short* const w, int n) {
+  __m256i sum = _mm256_setzero_si256();
+
+  while ((n-=16)>=0) {
+    __m256i tmp = _mm256_madd_epi16(*( __m256i* ) &t[n], *( __m256i* ) &w[n]);
+    tmp = _mm256_srai_epi32(tmp, 8);
+    sum = _mm256_add_epi32(sum, tmp);
   }
-  sum = _mm_add_epi32 (sum, _mm_srli_si128 (sum, 8));
-  sum = _mm_add_epi32 (sum, _mm_srli_si128 (sum, 4));
-  return _mm_cvtsi128_si32 (sum);
+
+  __m128i lo = _mm256_extractf128_si256(sum, 0);
+  __m128i hi = _mm256_extractf128_si256(sum, 1);
+
+  __m128i newsum = _mm_hadd_epi32(lo, hi);
+  newsum = _mm_add_epi32(newsum, _mm_srli_si128(newsum, 8));
+  newsum = _mm_add_epi32(newsum, _mm_srli_si128(newsum, 4));
+  return _mm_cvtsi128_si32(newsum);
 }
 
-static inline void train (const short* const t, short* const w, int n, const int e) {
-  const __m128i one = _mm_set1_epi16 (1);
-  const __m128i err = _mm_set1_epi16 (short(e));
-  while ((n -= 8) >= 0) {
-    __m128i tmp = _mm_adds_epi16 (*(__m128i *) &t[n], *(__m128i *) &t[n]);
-    tmp = _mm_mulhi_epi16 (tmp, err);
-    tmp = _mm_adds_epi16 (tmp, one);
-    tmp = _mm_srai_epi16 (tmp, 1);
-    tmp = _mm_adds_epi16 (tmp, *(__m128i *) &w[n]);
+static inline void train(const short* const t, short* const w, int n, const int e) {
+  const __m256i one = _mm256_set1_epi16(1);
+  const __m256i err = _mm256_set1_epi16(short(e));
+
+  while ((n-=16)>=0) {
+    __m256i tmp = _mm256_adds_epi16(*( __m256i* ) &t[n], *( __m256i* ) &t[n]);
+    tmp = _mm256_mulhi_epi16(tmp, err);
+    tmp = _mm256_adds_epi16(tmp, one);
+    tmp = _mm256_srai_epi16(tmp, 1);
+    tmp = _mm256_adds_epi16(tmp, *( __m256i* ) &w[n]);
+    *( __m256i* ) &w[n] = tmp;
+  }
+}
+#elif defined(__SSE2__)
+#include <emmintrin.h>
+
+static inline int dot_product(const short* const t, const short* const w, int n) {
+  __m128i sum = _mm_setzero_si128();
+
+  while ((n-=8)>=0) {
+    __m128i tmp = _mm_madd_epi16(*(__m128i *) &t[n], *(__m128i *) &w[n]);
+    tmp = _mm_srai_epi32(tmp, 8);
+    sum = _mm_add_epi32(sum, tmp);
+  }
+
+  sum = _mm_add_epi32(sum, _mm_srli_si128 (sum, 8));
+  sum = _mm_add_epi32(sum, _mm_srli_si128 (sum, 4));
+  return _mm_cvtsi128_si32(sum);
+}
+
+static inline void train(const short* const t, short* const w, int n, const int e) {
+  const __m128i one = _mm_set1_epi16(1);
+  const __m128i err = _mm_set1_epi16(short(e));
+
+  while ((n-=8)>=0) {
+    __m128i tmp = _mm_adds_epi16(*(__m128i *) &t[n], *(__m128i *) &t[n]);
+    tmp = _mm_mulhi_epi16(tmp, err);
+    tmp = _mm_adds_epi16(tmp, one);
+    tmp = _mm_srai_epi16(tmp, 1);
+    tmp = _mm_adds_epi16(tmp, *(__m128i *) &w[n]);
     *(__m128i *) &w[n] = tmp;
   }
 }
@@ -1616,6 +1745,7 @@ static inline void train (const short* const t, short* const w, int n, const int
   }
 }
 #endif
+#define MIX_SIMD_MASK (MIX_SIMD_WIDTH-1)
 
 struct ErrorInfo {
   U32 Data[2], Sum, Mask, Collected;
@@ -1630,8 +1760,8 @@ inline U32 SQR(U32 x)
 
 class Mixer {
   const int N, M, S;   // max inputs, max contexts, max context sets
-  Array<short> tx; // N inputs from add()
-  Array<short> wx; // N*M weights
+  Array<short, MIX_SIMD_WIDTH*2> tx; // N inputs from add()
+  Array<short, MIX_SIMD_WIDTH*2> wx; // N*M weights
   Array<int> cxt;  // S contexts
   Array<ErrorInfo> info; // stats for the adaptive learning rates
   Array<int> rates; // learning rates
@@ -1691,7 +1821,7 @@ public:
 
   // predict next bit
   int p() {
-    while (nx&7) tx[nx++]=0;  // pad
+    while (nx&MIX_SIMD_MASK) tx[nx++]=0;  // pad
     if (mp) {  // combine outputs
       mp->update();
       for (int i=0; i<ncxt; ++i) {
@@ -1717,9 +1847,9 @@ Mixer::~Mixer() {
 
 
 Mixer::Mixer(int n, int m, int s, int w):
-    N((n+7)&-8), M(m), S(s), tx(N), wx(N*M), cxt(S), info(S), rates(S), 
+    N((n+MIX_SIMD_MASK)&-MIX_SIMD_WIDTH), M(m), S(s), tx(N), wx(N*M), cxt(S), info(S), rates(S), 
     ncxt(0), base(0), nx(0), pr(S), mp(0) {
-  assert(n>0 && N>0 && (N&7)==0 && M>0);
+  assert(n>0 && N>0 && (N&MIX_SIMD_MASK)==0 && M>0);
   int i;
   for (i=0; i<S; ++i){
     pr[i]=2048; //initial p=0.5
@@ -1979,110 +2109,6 @@ inline U8* HashTable<B>::operator[](U32 i) { //i: context selector
   return p+i+1;
 }
 
-/*
-HashTable with buckets of 64-bytes, 7 available slots per bucket, 7 bytes per slot.
-Each slot is verified by an 8 bit checksum, 5 bit type (usually the context order)
-and 1 bit flag (usually to request the first slot for a context at a byte-boundary)
-
-Collisions are handled by a replacement policy that scores each slot based on their
-overall usage (as implied by the 1st state byte) and their placement in an MTF list
-stating recency usage.
-*/
-
-class HashTableB64 {
-private:
-  const int LRU_BIAS = 4; // higher values favor the replacement of the least recently used slot instead of least overall used slot.
-  const int LRU_SEARCH_COUNT = 3; //number of MTF tail elements to consider when looking for a replacement slot
-  Array<U8,64> Table;
-  const U64 Mask; // bucket access mask
-  U32 bMTF; // bucket MTF list
-  U64 *bInfo; // bucket info, uses 64 bits
-  U8 *p;
-  bool bFull; // bucket is full?
-  inline U32 MTFItem(const U32 i){ return (bMTF>>(18-i*3))&7; }
-  inline U32 ChooseReplacement(const U64 Bucket) {
-    assert(bFull);
-    int worst = 0xFFFF;
-    U32 i = 0;
-    for (int j=6; j>=(7-LRU_SEARCH_COUNT); j--) {
-      U32 k = MTFItem(j)-1;
-      assert(k<7);
-      int score = p[Bucket+15+k*7]-j*LRU_BIAS;
-      if (score<worst) {
-        i = k;
-        worst = score;
-      }
-    }
-    return i;
-  }
-  inline void MoveToFront(const U32 i) {
-    assert(i>0 && i<=7);
-    U32 k=0, j=0;
-    if (bFull) {
-      for (; k<7 && (j = MTFItem(k))!=i; k++) assert(j>0);
-      if (k>0) {
-        bMTF = ((bMTF&(0xFFFFFFFFu<<(21-k*3)))>>3)|(bMTF&((1<<(18-k*3))-1))|(j<<18);
-        (*bInfo) = ((*bInfo)&0xFFFFFFFFE00000FFu)|(bMTF<<8);
-      }
-    }
-    else {
-      for (; k<7 && (j = MTFItem(k))!=i && j>0; k++) {}
-      if (j==0) {
-        bMTF = (bMTF>>3)|((k+1)<<18);
-        (*bInfo) = ((*bInfo)&0xFFFFFFFFE00000FFu)|(bMTF<<8)|(k==6);
-      }
-      else if (k>0) {
-        bMTF = ((bMTF&(0xFFFFFFFFu<<(21-k*3)))>>3)|(bMTF&((1<<(18-k*3))-1))|(j<<18);
-        (*bInfo) = ((*bInfo)&0xFFFFFFFFE00000FFu)|(bMTF<<8);
-      }
-    }
-  }
-public:
-  HashTableB64(U64 Size): Table(Size), Mask(Size-64) {
-    assert((Size&(Size-1))==0);
-    assert((Size>>10)>0);
-    p = &Table[0];
-  }
-  inline U8* Find(U64 ctx, U32 type, const bool flag) {
-    ctx*=123456791;
-    ctx = (ctx<<32)|(ctx>>32);
-    ctx*=234567891;
-    type = min(0x1F, type);
-    U8 chk = ctx>>56; // 8-bit checksum
-    ctx = (ctx*64)&Mask;
-    bInfo = (U64*)&p[ctx];
-    bFull = (*bInfo)&1;
-    U32 bFlags = ((*bInfo)>>1)&0x7F; // bucket flags, 7 bits, 1 bit per slot
-    bMTF = ((*bInfo)>>8)&0x1FFFFFu;
-    assert(bFull || (bMTF&7)==0);
-    U32 k = 0;
-    if (bFull) {
-      for (; k<7; k++) {
-        if (p[ctx+8+k]==chk && ((bFlags>>k)&1)==flag && (((*bInfo)>>(59-k*5))&0x1F)==type) {
-          MoveToFront(k+1);
-          return p+ctx+15+k*7;
-        }
-      }
-      k = ChooseReplacement(ctx);
-    }
-    else {
-      for (; k<7 && MTFItem(k)!=0; k++) {
-        if (p[ctx+8+k]==chk && ((bFlags>>k)&1)==flag && (((*bInfo)>>(59-k*5))&0x1F)==type) {
-          MoveToFront(k+1);
-          return p+ctx+15+k*7;
-        }
-      }
-    }
-    assert(k<7);
-    MoveToFront(k+1);
-    p[ctx+8+k] = chk;
-    bFlags = (bFlags&(0x7F-(1<<k)))|(flag<<k);
-    (*bInfo) = ((*bInfo)&(0xFFFFFFFFFFFFFF01u-(0x1Full<<(59-k*5))))|(bFlags<<1)|(((U64)type)<<(59-k*5));
-    memset(&p[ctx+15+k*7], 0, 7);
-    return p+ctx+15+k*7;
-  }
-};
-
 /////////////////////////// ContextMap /////////////////////////
 //
 // A ContextMap maps contexts to a bit histories and makes predictions
@@ -2237,379 +2263,6 @@ public:
     }
   }
 };
-
-/*
-Context map for large contexts (64bits).
-Maps to a bit history state and 4 MRU byte history.
-
-Bit and byte histories are stored in a hash table with 64 byte buckets. 
-The buckets are indexed by a context ending after 0, 2 or 5 bits of the
-current byte. Thus, each byte modeled results in 3 main memory accesses
-per context, with all other accesses to cache.
-
-On a byte boundary (bit 0), only 3 of the 7 bit history states are used.
-The remaining 4 bytes are then used to store the last bytes seen in this
-context. This byte history is then combined with the bit history states
-to provide additional states that are then mapped to predictions.
-*/
-
-class ContextMapB64 {
-private:
-  const U32 C;
-  HashTableB64 Table;
-  StateMap **Maps7b, **Maps8b, **Maps12b;
-  Array<U64> Contexts;
-  Array<U32*> ByteHistory;
-  Array<U8*> BitState;
-  Array<bool> HasHistory;
-  U32 index;
-  U8 lastByte, bits, lastBit, bitPos;
-  inline void Update() {
-    switch (bitPos) {
-      case 0: {
-        for (U32 i=0; i<index; i++) {
-          *BitState[i] = nex(*BitState[i], lastBit);
-          *ByteHistory[i] = ((*ByteHistory[i])<<8)|lastByte;
-          BitState[i] = Table.Find(Contexts[i], i, true);
-          ByteHistory[i] = (U32*)(BitState[i]+3);
-          HasHistory[i] = *BitState[i]>0;
-        }
-        break;
-      }
-      case 2: case 5: {
-        for (U32 i=0; i<index; i++) {
-          *BitState[i] = nex(*BitState[i], lastBit);
-          BitState[i] = Table.Find(Contexts[i]+bits*1337, i, false);
-        }
-        break;
-      }
-      default: {
-        int k = (lastBit+1)<<((bitPos%3)-(bitPos<2));
-        for (U32 i=0; i<index; i++) {
-          *BitState[i] = nex(*BitState[i], lastBit);
-          BitState[i]+=k;
-        }
-      }
-    }
-  }
-public:
-  ContextMapB64(const U64 Size, const U32 Count) : C(Count), Table(Size), Contexts(Count), ByteHistory(Count), BitState(Count), HasHistory(Count){
-    Maps7b = new StateMap*[C];
-    Maps8b = new StateMap*[C];
-    Maps12b = new StateMap*[C];
-    for (U32 i=0; i<C; i++) {
-      Maps7b[i] = new StateMap((1<<7)+8);
-      Maps8b[i] = new StateMap(1<<8);
-      Maps12b[i] = new StateMap((1<<12)+(1<<9));
-      BitState[i] = Table.Find(0, i, true);
-      ByteHistory[i] = (U32*)(BitState[i]+3);
-    }
-    index = 0;
-    lastByte = lastBit = 0;
-    bits = bitPos = 1;
-  }
-  ~ContextMapB64() {
-    for (U32 i=0; i<C; i++) {
-      delete Maps7b[i];
-      delete Maps8b[i];
-      delete Maps12b[i];
-    }
-    delete[] Maps7b;
-    delete[] Maps8b;
-    delete[] Maps12b;
-  }
-  inline void set(U64 ctx) {
-    ctx = ctx*987654323+index;
-    ctx = ctx<<32|ctx>>32;
-    Contexts[index] = ctx*123456791+index;
-    index++;
-    assert(index>0 && index<=C);
-  }
-  void Train(U8 B){
-    for (bitPos=0; bitPos<8; bitPos++){
-      Update();
-      lastBit = (B>>(7-bitPos))&1;
-      bits += bits+lastBit;
-    }
-    index = 0;
-    bits = bitPos = 1;
-    lastByte = B;
-  }
-  int mix(Mixer& m) {
-    int result = 0;
-    lastByte+=lastByte+lastBit;
-    lastBit = y;
-    bits = (bitPos>0)?bits*2+lastBit:1;
-    Update();
-
-    for (U32 i=0; i<index; i++) {
-      int state = *BitState[i];
-      result+=(state>0);
-      int p1 = Maps8b[i]->p(state);
-      int n0=nex(state, 2), n1=nex(state, 3), k=-~n1;
-      k = (k*64)/(k-~n0);
-      n0=-!n0, n1=-!n1;
-      if (HasHistory[i]) {
-        state  = ((*ByteHistory[i])>>(31-bitPos))&1;
-        state |= ((*ByteHistory[i])>>(22-bitPos))&2;
-        state |= ((*ByteHistory[i])>>(13-bitPos))&4;
-        state |=(((*ByteHistory[i])>>( 7-bitPos))&1)*8;
-      }
-      else
-        state = 0x10;
-      int st = stretch(p1)>>2;
-      m.add(st);
-      m.add((p1-2047)>>3);
-      p1>>=4;
-      int p0 = 255-p1;
-      m.add((st*(n1-n0))/2);
-      m.add((p1&n0)-(p0&n1));
-      m.add(stretch(Maps12b[i]->p(((state>>1)<<9)|(bitPos<<6)|k))>>2);
-      m.add(stretch(Maps7b[i]->p((state<<3)|bitPos))>>2);
-    }
-    if (bitPos==7) index = 0;
-    bitPos = (bitPos+1)&7;
-    return result;
-  }
-};
-
-class ContextMap2 {
-  const int C;  // max number of contexts
-  class E {  // hash element, 64 bytes
-    U16 chk[7];  // byte context checksums
-    U8 last;     // last 2 accesses (0-6) in low, high nibble
-  public:
-    U8 bh[7][7]; // byte context, 3-bit context -> bit history state
-                 // bh[][0] = 1st bit, bh[][1,2] = 2nd bit, bh[][3..6] = 3rd bit
-                 // bh[][0] is also a replacement priority, 0 = empty
-    U8* get(U16 chk);  // Find element (0-6) matching checksum.
-                       // If not found, insert or replace lowest priority (not last).
-  };
-  Array<E,64> t;  // bit histories for bits 0-1, 2-4, 5-7
-                  // For 0-1, also contains a run count in bh[][4] and value in bh[][5]
-                  // and pending update count in bh[7]
-  Array<U8*> cp;   // C pointers to current bit history
-  Array<U8*> cp0;  // First element of 7 element array containing cp[i]
-  Array<U32> cxt;  // C whole byte contexts (hashes)
-  Array<U8*> ByteHistory; // C [0..3] = count, value, unused, unused
-                   //StateMap *sm;    // C maps of state -> p
-  Array<bool> HasHistory;
-  StateMap **Maps6b, **Maps8b, **Maps12b;
-  int cn;          // Next context to set by set()
-  U8 bit, lastByte;
-public:
-  ContextMap2(int m, int c=1);  // m = memory in bytes, a power of 2, C = c
-  ~ContextMap2();
-  void Train(U8 B);
-  void set(U32 cx, int next=-1);   // set next whole byte context to cx; if "next" is 0 then set order does not matter
-  int mix(Mixer& m);
-};
-
-// Find or create hash element matching checksum ch
-inline U8* ContextMap2::E::get(U16 ch) {
-  if (chk[last&15]==ch) return &bh[last&15][0];
-  int b=0xffff, bi=0;
-  for (int i=0; i<7; ++i) {
-    if (chk[i]==ch) return last=last<<4|i, (U8*)&bh[i][0];
-    int pri=bh[i][0];
-    if (pri<b && (last&15)!=i && last>>4!=i) b=pri, bi=i;
-  }
-  return last=0xf0|bi, chk[bi]=ch, (U8*)memset(&bh[bi][0], 0, 7);
-}
-
-// Construct using m bytes of memory for c contexts
-ContextMap2::ContextMap2(int m, int c): C(c), t(m>>6), cp(c), cp0(c),
-cxt(c), ByteHistory(c), HasHistory(c), cn(0) {
-  assert(m>=64 && (m&(m-1))==0);  // power of 2?
-  assert(sizeof(E)==64);
-  Maps6b = new StateMap*[C];
-  Maps8b = new StateMap*[C];
-  Maps12b = new StateMap*[C];
-  for (int i=0; i<C; ++i) {
-    Maps6b[i] = new StateMap((1<<6)+8);
-    Maps8b[i] = new StateMap(1<<8);
-    Maps12b[i] = new StateMap((1<<12)+(1<<9));
-    cp0[i]=cp[i]=&t[0].bh[0][0];
-    ByteHistory[i]=cp[i]+3;
-  }
-  bit=lastByte=0;
-}
-
-ContextMap2::~ContextMap2() {
-  for (U32 i=0; i<C; i++) {
-    delete Maps6b[i];
-    delete Maps8b[i];
-    delete Maps12b[i];
-  }
-  delete[] Maps6b;
-  delete[] Maps8b;
-  delete[] Maps12b;
-}
-
-// Set the i'th context to cx
-inline void ContextMap2::set(U32 cx, int next) {
-  int i=cn++;
-  i&=next;
-  assert(i>=0 && i<C);
-  cx=cx*987654323+i;  // permute (don't hash) cx to spread the distribution
-  cx=cx<<16|cx>>16;
-  cxt[i]=cx*123456791+i;
-}
-
-void ContextMap2::Train(U8 B){
-  U8 bits = 1;
-  U64 tmask=t.size()-1;
-  for (int k=0;k<8;k++){
-    for (int i=0; i<cn; ++i){
-      if (cp[i])
-        *cp[i]=nex(*cp[i], bit);
-
-      // Update context pointers
-      if (k>1 && ByteHistory[i][0]==0)
-        cp[i]=0;
-      else
-      {
-        U16 chksum=cxt[i]>>16;
-        switch(k)
-        {
-          case 1: case 3: case 6: cp[i]=cp0[i]+1+(bits&1); break;
-          case 4: case 7: cp[i]=cp0[i]+3+(bits&3); break;
-          case 2: case 5: cp0[i]=cp[i]=t[(cxt[i]+bits)&tmask].get(chksum); break;
-          default:
-          {
-            cp0[i]=cp[i]=t[(cxt[i]+bits)&tmask].get(chksum);
-            // Update pending bit histories for bits 2-7
-            if (cp0[i][3]==2) {
-              const int c=cp0[i][4]+256;
-              U8 *p=t[(cxt[i]+(c>>6))&tmask].get(chksum);
-              p[0]=1+((c>>5)&1);
-              p[1+((c>>5)&1)]=1+((c>>4)&1);
-              p[3+((c>>4)&3)]=1+((c>>3)&1);
-              p=t[(cxt[i]+(c>>3))&tmask].get(chksum);
-              p[0]=1+((c>>2)&1);
-              p[1+((c>>2)&1)]=1+((c>>1)&1);
-              p[3+((c>>1)&3)]=1+(c&1);
-              cp0[i][6]=0;
-            }
-            // Update run count of previous context
-            ByteHistory[i][3] = ByteHistory[i][2];
-            ByteHistory[i][2] = ByteHistory[i][1];
-            if (ByteHistory[i][0]==0)  // new context
-              ByteHistory[i][0]=2, ByteHistory[i][1]=lastByte;
-            else if (ByteHistory[i][1]!=lastByte)  // different byte in context
-              ByteHistory[i][0]=1, ByteHistory[i][1]=lastByte;
-            else if (ByteHistory[i][0]<254)  // same byte in context
-              ByteHistory[i][0]+=2;
-            else if (ByteHistory[i][0]==255)
-              ByteHistory[i][0]=128;
-            ByteHistory[i]=cp0[i]+3;
-          } break;
-        }
-      }
-    }
-    bit = (B>>(7-k))&1;
-    bits+=bits + bit;
-  }
-  cn=0;
-  lastByte=B;
-}
-
-// Update the model with bit y, and predict next bit to mixer m.
-int ContextMap2::mix(Mixer& m) {
-  // Update model with y
-  U8 c1=buf(1);
-  int result=0;
-  U64 tmask=t.size()-1; 
-  for (int i=0; i<cn; ++i) {
-    if (cp[i]) {
-      assert(cp[i]>=&t[0].bh[0][0] && cp[i]<=&t[t.size()-1].bh[6][6]);
-      assert((uintptr_t(cp[i])&63)>=15);
-      *cp[i]=nex(*cp[i], y);
-    }
-
-    // Update context pointers
-    if (bpos>1 && ByteHistory[i][0]==0)
-      cp[i]=0;
-    else
-    {
-      U16 chksum=cxt[i]>>16;     
-      switch(bpos)
-      {
-        case 1: case 3: case 6: cp[i]=cp0[i]+1+(c0&1); break;
-        case 4: case 7: cp[i]=cp0[i]+3+(c0&3); break;
-        case 2: case 5: cp0[i]=cp[i]=t[(cxt[i]+c0)&tmask].get(chksum); break;
-        default:
-        {
-          cp0[i]=cp[i]=t[(cxt[i]+c0)&tmask].get(chksum);
-          // Update pending bit histories for bits 2-7
-          if (cp0[i][3]==2) {
-            const int c=cp0[i][4]+256;
-            U8 *p=t[(cxt[i]+(c>>6))&tmask].get(chksum);
-            p[0]=1+((c>>5)&1);
-            p[1+((c>>5)&1)]=1+((c>>4)&1);
-            p[3+((c>>4)&3)]=1+((c>>3)&1);
-            p=t[(cxt[i]+(c>>3))&tmask].get(chksum);
-            p[0]=1+((c>>2)&1);
-            p[1+((c>>2)&1)]=1+((c>>1)&1);
-            p[3+((c>>1)&3)]=1+(c&1);
-            cp0[i][6]=0;
-          }
-          ByteHistory[i][3] = ByteHistory[i][2];
-          ByteHistory[i][2] = ByteHistory[i][1];
-          // Update byte history of previous context
-          if (ByteHistory[i][0]==0)  // new context
-            ByteHistory[i][0]=2, ByteHistory[i][1]=c1;
-          else if (ByteHistory[i][1]!=c1)  // different byte in context
-            ByteHistory[i][0]=1, ByteHistory[i][1]=c1;
-          else if (ByteHistory[i][0]<254)  // same byte in context
-            ByteHistory[i][0]+=2;
-          else if (ByteHistory[i][0]==255)
-            ByteHistory[i][0]=128;
-          ByteHistory[i]=cp0[i]+3;
-          HasHistory[i]=*cp0[i]>15;
-        } break;
-      }
-    }
-
-    // predict from last byte in context
-    if ((ByteHistory[i][1]+256)>>(8-bpos)==c0) {
-      int rc=ByteHistory[i][0];  // count*2, +1 if 2 different bytes seen
-      int sign=(ByteHistory[i][1]>>(7-bpos)&1)*2-1;  // predicted bit + for 1, - for 0
-      int c=ilog(rc+1)<<(2+(~rc&1));
-      m.add(sign*c);
-    }
-    else if (bpos>0 && (ByteHistory[i][0]&1)>0) {
-      if ((ByteHistory[i][2]+256)>>(8-bpos)==c0)
-        m.add((((ByteHistory[i][2]>>(7-bpos))&1)*2-1)*128);
-      else if (HasHistory[i] && (ByteHistory[i][3]+256)>>(8-bpos)==c0)
-        m.add((((ByteHistory[i][3]>>(7-bpos))&1)*2-1)*128);
-      else
-        m.add(0);
-    }
-    else
-      m.add(0); //p=0.5
-
-    // predict from bit context
-    int s = 0;
-    if (cp[i]) s = *cp[i];
-    mix2(m,s,*Maps8b[i]);
-  
-    if (s>0) result++;
-
-    int n0=-~nex(s, 2), n1=-~nex(s, 3), k = (n1*64)/(n1+n0);
-    if (HasHistory[i]) {
-      s  = (ByteHistory[i][1]>>(7-bpos))&1;
-      s |= ((ByteHistory[i][2]>>(7-bpos))&1)*2;
-      s |= ((ByteHistory[i][3]>>(7-bpos))&1)*4;
-    }
-    else
-      s = 8;
-    m.add(stretch(Maps12b[i]->p((s<<9)|(bpos<<6)|k))>>2);
-    m.add(stretch(Maps6b[i]->p((s<<3)|bpos))>>2);
-  }
-  if (bpos==7) cn=0;
-  return result;
-}
 
 // Context map for large contexts.  Most modeling uses this type of context
 // map.  It includes a built in RunContextMap to predict the last byte seen
@@ -2855,260 +2508,583 @@ int ContextMap::mix(Mixer& m) {
   return result;
 }
 
+/*
+Context map for large contexts (32bits).
+Maps to a bit history state, a 3 MRU byte history, and 1 byte RunStats.
+
+Bit and byte histories are stored in a hash table with 64 byte buckets. 
+The buckets are indexed by a context ending after 0, 2 or 5 bits of the
+current byte. Thus, each byte modeled results in 3 main memory accesses
+per context, with all other accesses to cache.
+
+On a byte boundary (bit 0), only 3 of the 7 bit history states are used.
+Of the remaining 4 bytes, 3 are then used to store the last bytes seen
+in this context, 7 bits to store the length of consecutive occurences of
+the previously seen byte, and 1 bit to signal if more than 1 byte as been
+seen in this context. The byte history is then combined with the bit history
+states to provide additional states that are then mapped to predictions.
+*/
+
+class ContextMap2 {
+  const U32 C; // max number of contexts
+  class Bucket { // hash bucket, 64 bytes
+    U16 Checksums[7]; // byte context checksums
+    U8 MRU; // last 2 accesses (0-6) in low, high nibble
+  public:
+    U8 BitState[7][7]; // byte context, 3-bit context -> bit history state
+                       // BitState[][0] = 1st bit, BitState[][1,2] = 2nd bit, BitState[][3..6] = 3rd bit
+                       // BitState[][0] is also a replacement priority, 0 = empty
+    inline U8* Find(U16 Checksum) { // Find or create hash element matching checksum. 
+                                    // If not found, insert or replace lowest priority (skipping 2 most recent).
+      if (Checksums[MRU&15]==Checksum)
+        return &BitState[MRU&15][0];
+      int worst=0xFFFF, index=0;
+      for (int i=0; i<7; ++i) {
+        if (Checksums[i]==Checksum)
+          return MRU=MRU<<4|i, (U8*)&BitState[i][0];
+        if (BitState[i][0]<worst && (MRU&15)!=i && MRU>>4!=i) {
+          worst = BitState[i][0];
+          index=i;
+        }
+      }
+      MRU = 0xF0|index;
+      Checksums[index] = Checksum;
+      return (U8*)memset(&BitState[index][0], 0, 7);
+    }
+  };
+  Array<Bucket, 64> Table; // bit histories for bits 0-1, 2-4, 5-7
+                           // For 0-1, also contains run stats in BitState[][3] and byte history in BitState[][4..6]
+  Array<U8*> BitState; // C pointers to current bit history states
+  Array<U8*> BitState0; // First element of 7 element array containing BitState[i]
+  Array<U8*> ByteHistory; // C pointers to run stats plus byte history, 4 bytes, [RunStats,1..3]
+  Array<U32> Contexts; // C whole byte contexts (hashes)
+  Array<bool> HasHistory; // True if context has a full valid byte history (i.e., seen at least 3 times)
+  StateMap **Maps6b, **Maps8b, **Maps12b;
+  U32 index; // Next context to set by set()
+  U32 bits;
+  U8 lastByte, lastBit, bitPos;
+  inline void Update() {
+    U64 mask = Table.size()-1;
+    for (U32 i=0; i<index; i++) {
+      if (BitState[i])
+        *BitState[i] = nex(*BitState[i], lastBit);
+
+      if (bitPos>1 && ByteHistory[i][0]==0)
+        BitState[i] = nullptr;
+      else {
+        U16 chksum = Contexts[i]>>16;
+        switch (bitPos) {
+          case 0: {
+            BitState[i] = BitState0[i] = Table[(Contexts[i]+bits)&mask].Find(chksum);
+            // Update pending bit histories for bits 2-7
+            if (BitState0[i][3]==2) {
+              const int c = BitState0[i][4]+256;
+              U8 *p = Table[(Contexts[i]+(c>>6))&mask].Find(chksum);
+              p[0] = 1+((c>>5)&1);
+              p[1+((c>>5)&1)] = 1+((c>>4)&1);
+              p[3+((c>>4)&3)] = 1+((c>>3)&1);
+              p = Table[(Contexts[i]+(c>>3))&mask].Find(chksum);
+              p[0] = 1+((c>>2)&1);
+              p[1+((c>>2)&1)] = 1+((c>>1)&1);
+              p[3+((c>>1)&3)] = 1+(c&1);
+              BitState0[i][6] = 0;
+            }
+            // Update byte history of previous context
+            ByteHistory[i][3] = ByteHistory[i][2];
+            ByteHistory[i][2] = ByteHistory[i][1];
+            if (ByteHistory[i][0]==0)  // new context
+              ByteHistory[i][0]=2, ByteHistory[i][1]=lastByte;
+            else if (ByteHistory[i][1]!=lastByte)  // different byte in context
+              ByteHistory[i][0]=1, ByteHistory[i][1]=lastByte;
+            else if (ByteHistory[i][0]<254)  // same byte in context
+              ByteHistory[i][0]+=2;
+            else if (ByteHistory[i][0]==255) // more than one byte seen, but long run of current byte, reset to single byte seen
+              ByteHistory[i][0] = 128;
+
+            ByteHistory[i] = BitState0[i]+3;
+            HasHistory[i] = *BitState0[i]>15;
+            break;
+          }
+          case 2: case 5: {
+            BitState[i] = BitState0[i] = Table[(Contexts[i]+bits)&mask].Find(chksum);
+            break;
+          }
+          case 1: case 3: case 6: BitState[i] = BitState0[i]+1+lastBit; break;
+          case 4: case 7: BitState[i] = BitState0[i]+3+(bits&3); break;
+        }
+      }
+    }
+  }
+public:
+  // Construct using Size bytes of memory for Count contexts
+  ContextMap2(const U64 Size, const U32 Count) : C(Count), Table(Size>>6), BitState(Count), BitState0(Count), ByteHistory(Count), Contexts(Count), HasHistory(Count){
+    assert(Size>=64 && (Size&(Size-1))==0);  // power of 2?
+    assert(sizeof(Bucket)==64);
+    Maps6b = new StateMap*[C];
+    Maps8b = new StateMap*[C];
+    Maps12b = new StateMap*[C];
+    for (U32 i=0; i<C; i++) {
+      Maps6b[i] = new StateMap((1<<6)+8);
+      Maps8b[i] = new StateMap(1<<8);
+      Maps12b[i] = new StateMap((1<<12)+(1<<9));
+      BitState[i] = BitState0[i] = &Table[i].BitState[0][0];
+      ByteHistory[i] = BitState[i]+3;
+    }
+    index = 0;
+    lastByte = lastBit = 0;
+    bits = 1;  bitPos = 0;
+  }
+  ~ContextMap2() {
+    for (U32 i=0; i<C; i++) {
+      delete Maps6b[i];
+      delete Maps8b[i];
+      delete Maps12b[i];
+    }
+    delete[] Maps6b;
+    delete[] Maps8b;
+    delete[] Maps12b;
+  }
+  inline void set(U32 ctx) { // set next whole byte context to ctx
+    ctx = ctx*987654323+index; // permute (don't hash) ctx to spread the distribution
+    ctx = ctx<<16|ctx>>16;
+    Contexts[index] = ctx*123456791+index;
+    index++;
+    assert(index>0 && index<=C);
+  }
+  void Train(const U8 B){
+    for (bitPos=0; bitPos<8; bitPos++){
+      Update();
+      lastBit = (B>>(7-bitPos))&1;
+      bits += bits+lastBit;
+    }
+    index = 0;
+    bits = 1; bitPos = 0;
+    lastByte = B;
+  }
+  int mix(Mixer& m) {
+    int result = 0;
+    lastBit = y;
+    bitPos = bpos;
+    bits+=bits+lastBit;
+    lastByte = bits&0xFF;
+    if (bitPos==0)
+      bits = 1;
+    Update();
+
+    for (U32 i=0; i<index; i++) {
+      // predict from bit context
+      int state = (BitState[i])?*BitState[i]:0;
+      result+=(state>0);
+      int p1 = Maps8b[i]->p(state);
+      int n0=nex(state, 2), n1=nex(state, 3), k=-~n1;
+      k = (k*64)/(k-~n0);
+      n0=-!n0, n1=-!n1;
+      // predict from last byte in context
+      if ((U32)((ByteHistory[i][1]+256)>>(8-bitPos))==bits){
+        int RunStats = ByteHistory[i][0]; // count*2, +1 if 2 different bytes seen
+        int sign=(ByteHistory[i][1]>>(7-bitPos)&1)*2-1;  // predicted bit + for 1, - for 0
+        int value = ilog(RunStats+1)<<(3-(RunStats&1));
+        m.add(sign*value);
+      }
+      else if (bitPos>0 && (ByteHistory[i][0]&1)>0) {
+        if ((U32)((ByteHistory[i][2]+256)>>(8-bitPos))==bits)
+          m.add((((ByteHistory[i][2]>>(7-bitPos))&1)*2-1)*128);
+        else if (HasHistory[i] && (U32)((ByteHistory[i][3]+256)>>(8-bitPos))==bits)
+          m.add((((ByteHistory[i][3]>>(7-bitPos))&1)*2-1)*128);
+        else
+          m.add(0);
+      }
+      else
+        m.add(0);
+
+      if (HasHistory[i]) {
+        state  = (ByteHistory[i][1]>>(7-bitPos))&1;
+        state |= ((ByteHistory[i][2]>>(7-bitPos))&1)*2;
+        state |= ((ByteHistory[i][3]>>(7-bitPos))&1)*4;
+      }
+      else
+        state = 8;
+
+      int st = stretch(p1)>>2;
+      m.add(st);
+      m.add((p1-2047)>>3);
+      p1>>=4;
+      int p0 = 255-p1;
+      m.add((st*(n1-n0)));
+      m.add((p1&n0)-(p0&n1));
+      m.add((p1&n1)-(p0&n0));
+      m.add(stretch(Maps12b[i]->p((state<<9)|(bitPos<<6)|k))>>2);
+      m.add(stretch(Maps6b[i]->p((state<<3)|bitPos))>>2);
+    }
+    if (bitPos==7) index = 0;
+    return result;
+  }
+};
+
+//////////////////////////// Text modelling /////////////////////////
+
+inline bool CharInArray(const char c, const char a[], const int len) {
+  if (a==nullptr)
+    return false;
+  int i=0;
+  for (; i<len && c!=a[i]; i++);
+  return i<len;
+}
+
+#define MAX_WORD_SIZE 64
+#define TAB 0x09
+#define NEW_LINE 0x0A
+#define CARRIAGE_RETURN 0x0D
+#define SPACE 0x20
+
+class Word {
+public:
+  U8 Letters[MAX_WORD_SIZE];
+  U8 Start, End;
+  U32 Hash[4], Type, Language;
+  Word() : Start(0), End(0), Hash{0,0,0,0}, Type(0) {
+    memset(&Letters[0], 0, sizeof(U8)*MAX_WORD_SIZE);
+  }
+  bool operator==(const char *s) const {
+    size_t len=strlen(s);
+    return ((size_t)(End-Start+(Letters[Start]!=0))==len && memcmp(&Letters[Start], s, len)==0);
+  }
+  bool operator!=(const char *s) const {
+    return !operator==(s);
+  }
+  void operator+=(const char c) {
+    if (End<MAX_WORD_SIZE-1){
+      End+=(Letters[End]>0);
+      Letters[End]=tolower(c);
+    }
+  }
+  U8 operator[](U8 i) const {
+    return (End-Start>=i)?Letters[Start+i]:0;
+  }
+  U8 operator()(U8 i) const {
+    return (End-Start>=i)?Letters[End-i]:0;
+  }
+  U32 Length() const {
+    if (Letters[Start]!=0)
+      return End-Start+1;
+    return 0;
+  }
+  void GetHashes() {
+    Hash[0] = 0xc01dflu, Hash[1] = ~Hash[0];
+    for (int i=Start; i<=End; i++) {
+      U8 l = Letters[i];
+      Hash[0]^=hash(Hash[0], l, i);
+      Hash[1]^=hash(Hash[1], 
+        ((l&0x80)==0)?l&0x5F:
+        ((l&0xC0)==0x80)?l&0x3F:
+        ((l&0xE0)==0xC0)?l&0x1F:
+        ((l&0xF0)==0xE0)?l&0xF:l&0x7
+      );
+    }
+    Hash[2] = (~Hash[0])^Hash[1];
+    Hash[3] = (~Hash[1])^Hash[0];
+  }
+  bool ChangeSuffix(const char *OldSuffix, const char *NewSuffix) {
+    size_t len=strlen(OldSuffix);
+    if (Length()>len && memcmp(&Letters[End-len+1], OldSuffix, len)==0){
+      size_t n=strlen(NewSuffix);
+      if (n>0){
+        memcpy(&Letters[End-int(len)+1], NewSuffix, min(MAX_WORD_SIZE-1,End+int(n))-End);
+        End=min(MAX_WORD_SIZE-1, End-int(len)+int(n));
+      }
+      else
+        End-=U8(len);
+      return true;
+    }
+    return false;
+  }
+  bool MatchesAny(const char* a[], const int count) {
+    int i=0;
+    size_t len = (size_t)Length();
+    for (; i<count && (len!=strlen(a[i]) || memcmp(&Letters[Start], a[i], len)!=0); i++);
+    return i<count;
+  }
+  bool EndsWith(const char *Suffix) const {
+    size_t len=strlen(Suffix);
+    return (Length()>len && memcmp(&Letters[End-len+1], Suffix, len)==0);
+  }
+  bool StartsWith(const char *Prefix) const {
+    size_t len=strlen(Prefix);
+    return (Length()>len && memcmp(&Letters[Start], Prefix, len)==0);
+  }
+};
+
+class Segment {
+public:
+  Word FirstWord; // useful following questions
+  U32 WordCount;
+  U32 NumCount;
+};
+
+class Sentence : public Segment {
+public:
+  enum Types { // possible sentence types, excluding Imperative
+    Declarative,
+    Interrogative,
+    Exclamative,
+    Count
+  };
+  Types Type;
+  U32 SegmentCount;
+};
+
+class Paragraph {
+public:
+  U32 SentenceCount, TypeCount[Sentence::Types::Count], TypeMask;
+};
+
+class Language {
+public:
+  enum {
+    Unknown,
+    English,
+    French,
+    Count
+  };
+  virtual bool IsAbbreviation(Word *W) = 0;
+};
+
+class English: public Language {
+private:
+  static const int NUM_ABBREV = 6;
+  const char *Abbreviations[NUM_ABBREV]={ "mr","mrs","ms","dr","st","jr" };
+public:
+  enum Flags {
+    Verb                   = (1<<0),
+    Noun                   = (1<<1),
+    Adjective              = (1<<2),
+    Plural                 = (1<<3),
+    Male                   = (1<<4),
+    Female                 = (1<<5),
+    Negation               = (1<<6),
+    PastTense              = (1<<7)|Verb,
+    PresentParticiple      = (1<<8)|Verb,
+    AdjectiveSuperlative   = (1<<9)|Adjective,
+    AdjectiveWithout       = (1<<10)|Adjective,
+    AdjectiveFull          = (1<<11)|Adjective,
+    AdverbOfManner         = (1<<12),
+    SuffixNESS             = (1<<13),
+    SuffixITY              = (1<<14)|Noun,
+    SuffixCapable          = (1<<15),
+    SuffixNCE              = (1<<16),
+    SuffixNT               = (1<<17),
+    SuffixION              = (1<<18),
+    SuffixAL               = (1<<19)|Adjective,
+    SuffixIC               = (1<<20)|Adjective,
+    SuffixIVE              = (1<<21),
+    SuffixOUS              = (1<<22)|Adjective,
+    PrefixOver             = (1<<23),
+    PrefixUnder            = (1<<24)
+  };
+  bool IsAbbreviation(Word *W) { return W->MatchesAny(Abbreviations, NUM_ABBREV); };
+};
+
+class French: public Language {
+private:
+  static const int NUM_ABBREV = 2;
+  const char *Abbreviations[NUM_ABBREV]={ "m","mm" };
+public:
+  enum Flags {
+    Verb                   = (1<<0),
+    Noun                   = (1<<1),
+    Adjective              = (1<<2),
+    Plural                 = (1<<3)
+  };
+  bool IsAbbreviation(Word *W) { return W->MatchesAny(Abbreviations, NUM_ABBREV); };
+};
+
 //////////////////////////// Stemming routines /////////////////////////
+
+class Stemmer {
+public:
+  virtual bool IsVowel(const char c) = 0;
+  virtual void Hash(Word *W) = 0;
+  virtual bool Stem(Word *W) = 0;
+};
+
 /*
   English affix stemmer, based on the Porter2 stemmer.
 
   Changelog:
   (29/12/2017) v127: Initial release by Márcio Pais
   (02/01/2018) v128: Small changes to allow for compilation with MSVC
-                     Fix buffer overflow (thank you Jan Ondrus)
+  Fix buffer overflow (thank you Jan Ondrus)
+  (28/01/2018) v133: Refactoring, added processing of "non/non-" prefixes
+  (04/02/2018) v135: Refactoring, added processing of gender-specific words and common words
 */
-#define MAX_WORD_SIZE 64
-class Word {
-public:
-  U8 Letters[MAX_WORD_SIZE];
-  U8 Start, End;
-  U32 Hash, Type;
-  Word(): Start(0), End(0), Hash(0), Type(0){
-    memset(&Letters[0], 0, sizeof(U8)*MAX_WORD_SIZE);
-  }
-  bool operator==(const char *s) const{
-    size_t len=strlen(s);
-    return ((size_t)(End-Start+(Letters[Start]!=0))==len && memcmp(&Letters[Start], s, len)==0);
-  }
-  bool operator!=(const char *s) const{
-    return !operator==(s);
-  }
-  void operator+=(const char c){
-    if (c>0 && End<MAX_WORD_SIZE-1){
-      End+=(Letters[End]>0);
-      Letters[End]=tolower(c);
-    }
-  }
-  U8 operator[](U8 i) const{
-    return (End-Start>=i)?Letters[Start+i]:0;
-  }
-  U8 operator()(U8 i) const{
-    return (End-Start>=i)?Letters[End-i]:0;
-  }
-  U32 Length() const{
-    if (Letters[Start]!=0)
-      return End-Start+1;
-    return 0;
-  }
-  bool ChangeSuffix(const char *OldSuffix, const char *NewSuffix){
-    size_t len=strlen(OldSuffix);
-    if (Length()>len && memcmp(&Letters[End-len+1], OldSuffix, len)==0){
-      size_t n=strlen(NewSuffix);
-      if (n>0){
-        memcpy(&Letters[End-len+1], NewSuffix, min(MAX_WORD_SIZE-1,End+n)-End);
-        End=min(MAX_WORD_SIZE-1, End-len+n);
-      }
-      else
-        End-=len;
-      return true;
-    }
-    return false;
-  }
-  bool EndsWith(const char *Suffix) const{
-    size_t len=strlen(Suffix);
-    return (Length()>len && memcmp(&Letters[End-len+1], Suffix, len)==0);
-  }
-  bool StartsWith(const char *Prefix) const{
-    size_t len=strlen(Prefix);
-    return (Length()>len && memcmp(&Letters[Start], Prefix, len)==0);
-  }
-};
 
-enum EngWordTypeFlags {
-  Verb                   = (1<<0),
-  Noun                   = (1<<1),
-  Adjective              = (1<<2),
-  Plural                 = (1<<3),
-  Negation               = (1<<4),
-  PastTense              = (1<<5)|Verb,
-  PresentParticiple      = (1<<6)|Verb,
-  AdjectiveSuperlative   = (1<<7)|Adjective,
-  AdjectiveWithout       = (1<<8)|Adjective,
-  AdjectiveFull          = (1<<9)|Adjective,
-  AdverbOfManner         = (1<<10),
-  SuffixNESS             = (1<<11),
-  SuffixITY              = (1<<12)|Noun,
-  SuffixCapable          = (1<<13),
-  SuffixNCE              = (1<<14),
-  SuffixNT               = (1<<15),
-  SuffixION              = (1<<16),
-  SuffixAL               = (1<<17)|Adjective,
-  SuffixIC               = (1<<18)|Adjective,
-  SuffixIVE              = (1<<19),
-  SuffixOUS              = (1<<20)|Adjective,
-  PrefixOver             = (1<<21),
-  PrefixUnder            = (1<<22)
-};
-
-#define NUM_VOWELS 6
-const char Vowels[NUM_VOWELS]={'a','e','i','o','u','y'};
-#define NUM_DOUBLES 9
-const char Doubles[NUM_DOUBLES]={'b','d','f','g','m','n','p','r','t'};
-#define NUM_LI_ENDINGS 10
-const char LiEndings[NUM_LI_ENDINGS]={'c','d','e','g','h','k','m','n','r','t'};
-#define NUM_NON_SHORT_CONSONANTS 3
-const char NonShortConsonants[NUM_NON_SHORT_CONSONANTS]={'w','x','Y'};
-#define NUM_SUFFIXES_STEP0 3
-const char *SuffixesStep0[NUM_SUFFIXES_STEP0]={"'s'","'s","'"};
-#define NUM_SUFFIXES_STEP1b 6
-const char *SuffixesStep1b[NUM_SUFFIXES_STEP1b]={"eedly","eed","ed","edly","ing","ingly"};
-const U32 TypesStep1b[NUM_SUFFIXES_STEP1b]={AdverbOfManner,0,PastTense,AdverbOfManner|PastTense,PresentParticiple,AdverbOfManner|PresentParticiple};
-#define NUM_SUFFIXES_STEP2 22
-const char *(SuffixesStep2[NUM_SUFFIXES_STEP2])[2]={
-  {"ization", "ize"},
-  {"ational", "ate"},
-  {"ousness", "ous"},
-  {"iveness", "ive"},
-  {"fulness", "ful"},
-  {"tional", "tion"},
-  {"lessli", "less"},
-  {"biliti", "ble"},
-  {"entli", "ent"},
-  {"ation", "ate"},
-  {"alism", "al"},
-  {"aliti", "al"},
-  {"fulli", "ful"},
-  {"ousli", "ous"},
-  {"iviti", "ive"},
-  {"enci", "ence"},
-  {"anci", "ance"},
-  {"abli", "able"},
-  {"izer", "ize"},
-  {"ator", "ate"},
-  {"alli", "al"},
-  {"bli", "ble"}
-};
-const U32 TypesStep2[NUM_SUFFIXES_STEP2]={
-  SuffixION,
-  SuffixION|SuffixAL,
-  SuffixNESS,
-  SuffixNESS,
-  SuffixNESS,
-  SuffixION|SuffixAL,
-  AdverbOfManner,
-  AdverbOfManner|SuffixITY,
-  AdverbOfManner,
-  SuffixION,
-  0,
-  SuffixITY,
-  AdverbOfManner,
-  AdverbOfManner,
-  SuffixITY,
-  0,
-  0,
-  AdverbOfManner,
-  0,
-  0,
-  AdverbOfManner,
-  AdverbOfManner
-};
-#define NUM_SUFFIXES_STEP3 8
-const char *(SuffixesStep3[NUM_SUFFIXES_STEP3])[2]={
-  {"ational", "ate"},
-  {"tional", "tion"},
-  {"alize", "al"},
-  {"icate", "ic"},
-  {"iciti", "ic"},
-  {"ical", "ic"},
-  {"ful", ""},
-  {"ness", ""}
-};
-const U32 TypesStep3[NUM_SUFFIXES_STEP3]={SuffixION|SuffixAL,SuffixION|SuffixAL,0,0,SuffixITY,SuffixAL,AdjectiveFull,SuffixNESS};
-#define NUM_SUFFIXES_STEP4 20
-const char *SuffixesStep4[NUM_SUFFIXES_STEP4]={"al","ance","ence","er","ic","able","ible","ant","ement","ment","ent","ou","ism","ate","iti","ous","ive","ize","sion","tion"};
-const U32 TypesStep4[NUM_SUFFIXES_STEP4]={
-  SuffixAL,
-  SuffixNCE,
-  SuffixNCE,
-  0,
-  SuffixIC,
-  SuffixCapable,
-  SuffixCapable,
-  SuffixNT,
-  0,
-  0,
-  SuffixNT,
-  0,
-  0,
-  0,
-  SuffixITY,
-  SuffixOUS,
-  SuffixIVE,
-  0,
-  SuffixION,
-  SuffixION
-};
-#define NUM_EXCEPTION_REGION1 3
-const char *ExceptionsRegion1[NUM_EXCEPTION_REGION1]={"gener","arsen","commun"};
-#define NUM_EXCEPTIONS1 18
-const char *(Exceptions1[NUM_EXCEPTIONS1])[2]={
-  {"skis", "ski"},
-  {"skies", "sky"},
-  {"dying", "die"},
-  {"lying", "lie"},
-  {"tying", "tie"},
-  {"idly", "idle"},
-  {"gently", "gentle"},
-  {"ugly", "ugli"},
-  {"early", "earli"},
-  {"only", "onli"},
-  {"singly", "singl"},
-  {"sky", "sky"},
-  {"news", "news"},
-  {"howe", "howe"},
-  {"atlas", "atlas"},
-  {"cosmos", "cosmos"},
-  {"bias", "bias"},
-  {"andes", "andes"}
-};
-const U32 TypesExceptions1[NUM_EXCEPTIONS1]={Plural,Plural,PresentParticiple,PresentParticiple,PresentParticiple,AdverbOfManner,AdverbOfManner,0,0,0,0,0,0,0,0,0,0,0};
-#define NUM_EXCEPTIONS2 8
-const char *Exceptions2[NUM_EXCEPTIONS2]={"inning","outing","canning","herring","earring","proceed","exceed","succeed"};
-
-inline bool CharInArray(const char c, const char a[], const int len){
-  if (a==NULL)
-    return false;
-  int i=0;
-  for (;i<len && c!=a[i];i++);
-  return i<len;
-}
-
-class EnglishStemmer {
+class EnglishStemmer: public Stemmer {
 private:
-  inline bool IsVowel(const char c){
-    return CharInArray(c, Vowels, NUM_VOWELS);
-  }
-
+  static const int NUM_VOWELS = 6;
+  const char Vowels[NUM_VOWELS]={'a','e','i','o','u','y'};
+  static const int NUM_DOUBLES = 9;
+  const char Doubles[NUM_DOUBLES]={'b','d','f','g','m','n','p','r','t'};
+  static const int NUM_LI_ENDINGS = 10;
+  const char LiEndings[NUM_LI_ENDINGS]={'c','d','e','g','h','k','m','n','r','t'};
+  static const int NUM_NON_SHORT_CONSONANTS = 3;
+  const char NonShortConsonants[NUM_NON_SHORT_CONSONANTS]={'w','x','Y'};
+  static const int NUM_MALE_WORDS = 9;
+  const char *MaleWords[NUM_MALE_WORDS]={"he","him","his","himself","man","men","boy","husband","actor"};
+  static const int NUM_FEMALE_WORDS = 8;
+  const char *FemaleWords[NUM_FEMALE_WORDS]={"she","her","herself","woman","women","girl","wife","actress"};
+  static const int NUM_COMMON_WORDS = 12;
+  const char *CommonWords[NUM_COMMON_WORDS]={"the","be","to","of","and","in","that","you","have","with","from","but"};
+  static const int NUM_SUFFIXES_STEP0 = 3;
+  const char *SuffixesStep0[NUM_SUFFIXES_STEP0]={"'s'","'s","'"};
+  static const int NUM_SUFFIXES_STEP1b = 6;
+  const char *SuffixesStep1b[NUM_SUFFIXES_STEP1b]={"eedly","eed","ed","edly","ing","ingly"};
+  const U32 TypesStep1b[NUM_SUFFIXES_STEP1b]={English::AdverbOfManner,0,English::PastTense,English::AdverbOfManner|English::PastTense,English::PresentParticiple,English::AdverbOfManner|English::PresentParticiple};
+  static const int NUM_SUFFIXES_STEP2 = 22;
+  const char *(SuffixesStep2[NUM_SUFFIXES_STEP2])[2]={
+    {"ization", "ize"},
+    {"ational", "ate"},
+    {"ousness", "ous"},
+    {"iveness", "ive"},
+    {"fulness", "ful"},
+    {"tional", "tion"},
+    {"lessli", "less"},
+    {"biliti", "ble"},
+    {"entli", "ent"},
+    {"ation", "ate"},
+    {"alism", "al"},
+    {"aliti", "al"},
+    {"fulli", "ful"},
+    {"ousli", "ous"},
+    {"iviti", "ive"},
+    {"enci", "ence"},
+    {"anci", "ance"},
+    {"abli", "able"},
+    {"izer", "ize"},
+    {"ator", "ate"},
+    {"alli", "al"},
+    {"bli", "ble"}
+  };
+  const U32 TypesStep2[NUM_SUFFIXES_STEP2]={
+    English::SuffixION,
+    English::SuffixION|English::SuffixAL,
+    English::SuffixNESS,
+    English::SuffixNESS,
+    English::SuffixNESS,
+    English::SuffixION|English::SuffixAL,
+    English::AdverbOfManner,
+    English::AdverbOfManner|English::SuffixITY,
+    English::AdverbOfManner,
+    English::SuffixION,
+    0,
+    English::SuffixITY,
+    English::AdverbOfManner,
+    English::AdverbOfManner,
+    English::SuffixITY,
+    0,
+    0,
+    English::AdverbOfManner,
+    0,
+    0,
+    English::AdverbOfManner,
+    English::AdverbOfManner
+  };
+  static const int NUM_SUFFIXES_STEP3 = 8;
+  const char *(SuffixesStep3[NUM_SUFFIXES_STEP3])[2]={
+    {"ational", "ate"},
+    {"tional", "tion"},
+    {"alize", "al"},
+    {"icate", "ic"},
+    {"iciti", "ic"},
+    {"ical", "ic"},
+    {"ful", ""},
+    {"ness", ""}
+  };
+  const U32 TypesStep3[NUM_SUFFIXES_STEP3]={English::SuffixION|English::SuffixAL,English::SuffixION|English::SuffixAL,0,0,English::SuffixITY,English::SuffixAL,English::AdjectiveFull,English::SuffixNESS};
+  static const int NUM_SUFFIXES_STEP4 = 20;
+  const char *SuffixesStep4[NUM_SUFFIXES_STEP4]={"al","ance","ence","er","ic","able","ible","ant","ement","ment","ent","ou","ism","ate","iti","ous","ive","ize","sion","tion"};
+  const U32 TypesStep4[NUM_SUFFIXES_STEP4]={
+    English::SuffixAL,
+    English::SuffixNCE,
+    English::SuffixNCE,
+    0,
+    English::SuffixIC,
+    English::SuffixCapable,
+    English::SuffixCapable,
+    English::SuffixNT,
+    0,
+    0,
+    English::SuffixNT,
+    0,
+    0,
+    0,
+    English::SuffixITY,
+    English::SuffixOUS,
+    English::SuffixIVE,
+    0,
+    English::SuffixION,
+    English::SuffixION
+  };
+  static const int NUM_EXCEPTION_REGION1 = 3;
+  const char *ExceptionsRegion1[NUM_EXCEPTION_REGION1]={"gener","arsen","commun"};
+  static const int NUM_EXCEPTIONS1 = 18;
+  const char *(Exceptions1[NUM_EXCEPTIONS1])[2]={
+    {"skis", "ski"},
+    {"skies", "sky"},
+    {"dying", "die"},
+    {"lying", "lie"},
+    {"tying", "tie"},
+    {"idly", "idle"},
+    {"gently", "gentle"},
+    {"ugly", "ugli"},
+    {"early", "earli"},
+    {"only", "onli"},
+    {"singly", "singl"},
+    {"sky", "sky"},
+    {"news", "news"},
+    {"howe", "howe"},
+    {"atlas", "atlas"},
+    {"cosmos", "cosmos"},
+    {"bias", "bias"},
+    {"andes", "andes"}
+  };
+  const U32 TypesExceptions1[NUM_EXCEPTIONS1]={
+    English::Noun|English::Plural,
+    English::Plural,
+    English::PresentParticiple,
+    English::PresentParticiple,
+    English::PresentParticiple,
+    English::AdverbOfManner,
+    English::AdverbOfManner,
+    English::Adjective,
+    English::Adjective|English::AdverbOfManner,
+    0,
+    English::AdverbOfManner,
+    English::Noun,
+    English::Noun,
+    0,
+    English::Noun,
+    English::Noun,
+    English::Noun,
+    0
+  };
+  static const int NUM_EXCEPTIONS2 = 8;
+  const char *Exceptions2[NUM_EXCEPTIONS2]={"inning","outing","canning","herring","earring","proceed","exceed","succeed"};
+  const U32 TypesExceptions2[NUM_EXCEPTIONS2]={English::Noun,English::Noun,English::Noun,English::Noun,English::Noun,English::Verb,English::Verb,English::Verb}; 
   inline bool IsConsonant(const char c){
     return !IsVowel(c);
   }
-
   inline bool IsShortConsonant(const char c){
     return !CharInArray(c, NonShortConsonants, NUM_NON_SHORT_CONSONANTS);
   }
-
   inline bool IsDouble(const char c){
     return CharInArray(c, Doubles, NUM_DOUBLES);
   }
-
   inline bool IsLiEnding(const char c){
     return CharInArray(c, LiEndings, NUM_LI_ENDINGS);
   }
-  inline void Hash(Word *W){
-    (*W).Hash=0xb0a710ad;
-    for (int i=(*W).Start;i<=(*W).End;i++)
-      (*W).Hash=(*W).Hash*263*32+(*W).Letters[i];
-  }
   U32 GetRegion(const Word *W, const U32 From){
     bool hasVowel = false;
-    for (int i=(*W).Start+From;i<=(*W).End;i++){
+    for (int i=(*W).Start+From; i<=(*W).End; i++){
       if (IsVowel((*W).Letters[i])){
         hasVowel = true;
         continue;
@@ -3116,12 +3092,12 @@ private:
       else if (hasVowel)
         return i-(*W).Start+1;
     }
-    return (*W).Length();
+    return (*W).Start+(*W).Length();
   }
   U32 GetRegion1(const Word *W){
-    for (int i=0;i<NUM_EXCEPTION_REGION1;i++){
+    for (int i=0; i<NUM_EXCEPTION_REGION1; i++){
       if ((*W).StartsWith(ExceptionsRegion1[i]))
-        return strlen(ExceptionsRegion1[i]);
+        return U32(strlen(ExceptionsRegion1[i]));
     }
     return GetRegion(W, 0);
   }
@@ -3140,7 +3116,7 @@ private:
     return (EndsInShortSyllable(W) && GetRegion1(W)==(*W).Length());
   }
   inline bool HasVowels(const Word *W){
-    for (int i=(*W).Start;i<=(*W).End;i++){
+    for (int i=(*W).Start; i<=(*W).End; i++){
       if (IsVowel((*W).Letters[i]))
         return true;
     }
@@ -3154,20 +3130,22 @@ private:
   void MarkYsAsConsonants(Word *W){
     if ((*W)[0]=='y')
       (*W).Letters[(*W).Start]='Y';
-    for (int i=(*W).Start+1;i<=(*W).End;i++){
+    for (int i=(*W).Start+1; i<=(*W).End; i++){
       if (IsVowel((*W).Letters[i-1]) && (*W).Letters[i]=='y')
         (*W).Letters[i]='Y';
     }
   }
   bool ProcessPrefixes(Word *W){
     if ((*W).StartsWith("irr") && (*W).Length()>5 && ((*W)[3]=='a' || (*W)[3]=='e'))
-      (*W).Start+=2, (*W).Type|=Negation;
+      (*W).Start+=2, (*W).Type|=English::Negation;
     else if ((*W).StartsWith("over") && (*W).Length()>5)
-      (*W).Start+=4, (*W).Type|=PrefixOver;
+      (*W).Start+=4, (*W).Type|=English::PrefixOver;
     else if ((*W).StartsWith("under") && (*W).Length()>6)
-      (*W).Start+=5, (*W).Type|=PrefixUnder;
+      (*W).Start+=5, (*W).Type|=English::PrefixUnder;
     else if ((*W).StartsWith("unn") && (*W).Length()>5)
-      (*W).Start+=2, (*W).Type|=Negation;
+      (*W).Start+=2, (*W).Type|=English::Negation;
+    else if ((*W).StartsWith("non") && (*W).Length()>(U32)(5+((*W)[3]=='-')))
+      (*W).Start+=2+((*W)[3]=='-'), (*W).Type|=English::Negation;
     else
       return false;
     return true;
@@ -3176,21 +3154,21 @@ private:
     if ((*W).EndsWith("est") && (*W).Length()>4){
       U8 i=(*W).End;
       (*W).End-=3;
-      (*W).Type|=AdjectiveSuperlative;
+      (*W).Type|=English::AdjectiveSuperlative;
 
       if ((*W)(0)==(*W)(1) && (*W)(0)!='r' && !((*W).Length()>=4 && memcmp("sugg",&(*W).Letters[(*W).End-3],4)==0)){
         (*W).End-= ( ((*W)(0)!='f' && (*W)(0)!='l' && (*W)(0)!='s') ||
                    ((*W).Length()>4 && (*W)(1)=='l' && ((*W)(2)=='u' || (*W)(3)=='u' || (*W)(3)=='v'))) &&
                    (!((*W).Length()==3 && (*W)(1)=='d' && (*W)(2)=='o'));
         if ((*W).Length()==2 && ((*W)[0]!='i' || (*W)[1]!='n'))
-          (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+          (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
       }
       else{
         switch((*W)(0)){
           case 'd': case 'k': case 'm': case 'y': break;
           case 'g': {
             if (!( (*W).Length()>3 && ((*W)(1)=='n' || (*W)(1)=='r') && memcmp("cong",&(*W).Letters[(*W).End-3],4)!=0 ))
-              (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+              (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
             else
               (*W).End+=((*W)(2)=='a');
             break;
@@ -3198,48 +3176,48 @@ private:
           case 'i': {(*W).Letters[(*W).End]='y'; break;}
           case 'l': {
             if ((*W).End==(*W).Start+1 || memcmp("mo",&(*W).Letters[(*W).End-2],2)==0)
-              (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+              (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
             else
               (*W).End+=IsConsonant((*W)(1));
             break;
           }
           case 'n': {
             if ((*W).Length()<3 || IsConsonant((*W)(1)) || IsConsonant((*W)(2)))
-              (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+              (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
             break;
           }
           case 'r': {
             if ((*W).Length()>3 && IsVowel((*W)(1)) && IsVowel((*W)(2)))
               (*W).End+=((*W)(2)=='u') && ((*W)(1)=='a' || (*W)(1)=='i');
             else
-              (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+              (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
             break;
           }
           case 's': {(*W).End++; break;}
           case 'w': {
             if (!((*W).Length()>2 && IsVowel((*W)(1))))
-              (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+              (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
             break;
           }
           case 'h': {
             if (!((*W).Length()>2 && IsConsonant((*W)(1))))
-              (*W).End = i, (*W).Type&=~AdjectiveSuperlative;
+              (*W).End = i, (*W).Type&=~English::AdjectiveSuperlative;
             break;
           }
           default: {
             (*W).End+=3;
-            (*W).Type&=~AdjectiveSuperlative;
+            (*W).Type&=~English::AdjectiveSuperlative;
           }
         }
       }
     }
-    return ((*W).Type&AdjectiveSuperlative)>0;
+    return ((*W).Type&English::AdjectiveSuperlative)>0;
   }
   bool Step0(Word *W){
-    for (int i=0;i<NUM_SUFFIXES_STEP0;i++){
+    for (int i=0; i<NUM_SUFFIXES_STEP0; i++){
       if ((*W).EndsWith(SuffixesStep0[i])){
-        (*W).End-=strlen(SuffixesStep0[i]);
-        (*W).Type|=Plural;
+        (*W).End-=U8(strlen(SuffixesStep0[i]));
+        (*W).Type|=English::Plural;
         return true;
       }
     }
@@ -3248,11 +3226,11 @@ private:
   bool Step1a(Word *W){
     if ((*W).EndsWith("sses")){
       (*W).End-=2;
-      (*W).Type|=Plural;
+      (*W).Type|=English::Plural;
       return true;
     }
     if ((*W).EndsWith("ied") || (*W).EndsWith("ies")){
-      (*W).Type|=((*W)(0)=='d')?PastTense:Plural;
+      (*W).Type|=((*W)(0)=='d')?English::PastTense:English::Plural;
       (*W).End-=1+((*W).Length()>4);
       return true;
     }
@@ -3262,7 +3240,7 @@ private:
       for (int i=(*W).Start;i<=(*W).End-2;i++){
         if (IsVowel((*W).Letters[i])){
           (*W).End--;
-          (*W).Type|=Plural;
+          (*W).Type|=English::Plural;
           return true;
         }
       }
@@ -3286,7 +3264,7 @@ private:
         }
         default: (*W).End-=3;
       }
-      (*W).Type|=Negation;
+      (*W).Type|=English::Negation;
       return true;
     }
     if ((*W).EndsWith("hood") && (*W).Length()>7){
@@ -3296,7 +3274,7 @@ private:
     return false;
   }
   bool Step1b(Word *W, const U32 R1){
-    for (int i=0;i<NUM_SUFFIXES_STEP1b;i++){
+    for (int i=0; i<NUM_SUFFIXES_STEP1b; i++){
       if ((*W).EndsWith(SuffixesStep1b[i])){
         switch(i){
           case 0: case 1: {
@@ -3306,7 +3284,7 @@ private:
           }
           default: {
             U8 j=(*W).End;
-            (*W).End-=strlen(SuffixesStep1b[i]);
+            (*W).End-=U8(strlen(SuffixesStep1b[i]));
             if (HasVowels(W)){
               if ((*W).EndsWith("at") || (*W).EndsWith("bl") || (*W).EndsWith("iz") || IsShortWord(W))
                 (*W)+='e';
@@ -3423,7 +3401,7 @@ private:
     return false;
   }
   bool Step2(Word *W, const U32 R1){
-    for (int i=0;i<NUM_SUFFIXES_STEP2;i++){
+    for (int i=0; i<NUM_SUFFIXES_STEP2; i++){
       if ((*W).EndsWith(SuffixesStep2[i][0]) && SuffixInRn(W, R1, SuffixesStep2[i][0])){
         (*W).ChangeSuffix(SuffixesStep2[i][0], SuffixesStep2[i][1]);
         (*W).Type|=TypesStep2[i];
@@ -3437,20 +3415,20 @@ private:
     else if ((*W).EndsWith("li")){
       if (SuffixInRn(W, R1, "li") && IsLiEnding((*W)(2))){
         (*W).End-=2;
-        (*W).Type|=AdverbOfManner;
+        (*W).Type|=English::AdverbOfManner;
         return true;
       }
       else if ((*W).Length()>3){
         switch((*W)(2)){
             case 'b': {
               (*W).Letters[(*W).End]='e';
-              (*W).Type|=AdverbOfManner;
+              (*W).Type|=English::AdverbOfManner;
               return true;              
             }
             case 'i': {
               if ((*W).Length()>4){
                 (*W).End-=2;
-                (*W).Type|=AdverbOfManner;
+                (*W).Type|=English::AdverbOfManner;
                 return true;
               }
               break;
@@ -3458,20 +3436,20 @@ private:
             case 'l': {
               if ((*W).Length()>5 && ((*W)(3)=='a' || (*W)(3)=='u')){
                 (*W).End-=2;
-                (*W).Type|=AdverbOfManner;
+                (*W).Type|=English::AdverbOfManner;
                 return true;
               }
               break;
             }
             case 's': {
               (*W).End-=2;
-              (*W).Type|=AdverbOfManner;
+              (*W).Type|=English::AdverbOfManner;
               return true;
             }
             case 'e': case 'g': case 'm': case 'n': case 'r': case 'w': {
               if ((*W).Length()>(U32)(4+((*W)(2)=='r'))){
                 (*W).End-=2;
-                (*W).Type|=AdverbOfManner;
+                (*W).Type|=English::AdverbOfManner;
                 return true;
               }
             }
@@ -3482,7 +3460,7 @@ private:
   }
   bool Step3(Word *W, const U32 R1, const U32 R2){
     bool res=false;
-    for (int i=0;i<NUM_SUFFIXES_STEP3;i++){
+    for (int i=0; i<NUM_SUFFIXES_STEP3; i++){
       if ((*W).EndsWith(SuffixesStep3[i][0]) && SuffixInRn(W, R1, SuffixesStep3[i][0])){
         (*W).ChangeSuffix(SuffixesStep3[i][0], SuffixesStep3[i][1]);
         (*W).Type|=TypesStep3[i];
@@ -3492,21 +3470,21 @@ private:
     }
     if ((*W).EndsWith("ative") && SuffixInRn(W, R2, "ative")){
       (*W).End-=5;
-      (*W).Type|=SuffixIVE;
+      (*W).Type|=English::SuffixIVE;
       return true;
     }
     if ((*W).Length()>5 && (*W).EndsWith("less")){
       (*W).End-=4;
-      (*W).Type|=AdjectiveWithout;
+      (*W).Type|=English::AdjectiveWithout;
       return true;
     }
     return res;
   }
   bool Step4(Word *W, const U32 R2){
     bool res=false;
-    for (int i=0;i<NUM_SUFFIXES_STEP4;i++){
+    for (int i=0; i<NUM_SUFFIXES_STEP4; i++){
       if ((*W).EndsWith(SuffixesStep4[i]) && SuffixInRn(W, R2, SuffixesStep4[i])){
-        (*W).End-=strlen(SuffixesStep4[i])-(i>17);
+        (*W).End-=U8(strlen(SuffixesStep4[i])-(i>17));
         if (i!=10 || (*W)(0)!='m')
           (*W).Type|=TypesStep4[i];
         if (i==0 && (*W).EndsWith("nti")){
@@ -3538,23 +3516,40 @@ private:
     return false;
   }
 public:
+  inline bool IsVowel(const char c) final {
+    return CharInArray(c, Vowels, NUM_VOWELS);
+  }
+  inline void Hash(Word *W) final {
+    (*W).Hash[2] = (*W).Hash[3] = 0xb0a710ad;
+    for (int i=(*W).Start; i<=(*W).End; i++) {
+      U8 l = (*W).Letters[i];
+      (*W).Hash[2]=(*W).Hash[2]*263*32 + l;
+      if (IsVowel(l))
+        (*W).Hash[3]=(*W).Hash[3]*997*8 + (l/4-22);
+      else if (l>='b' && l<='z')
+        (*W).Hash[3]=(*W).Hash[3]*271*32 + (l-97);
+      else
+        (*W).Hash[3]=(*W).Hash[3]*11*32 + l;
+    }
+  }
   bool Stem(Word *W){
-    if ((*W).Length()<3){
+    if ((*W).Length()<2){
       Hash(W);
       return false;
     }
     bool res = TrimStartingApostrophe(W);
-    if (ProcessPrefixes(W)) res = true;
-    if (ProcessSuperlatives(W)) res = true;
-    for (int i=0;i<NUM_EXCEPTIONS1;i++){
+    res|=ProcessPrefixes(W);
+    res|=ProcessSuperlatives(W);
+    for (int i=0; i<NUM_EXCEPTIONS1; i++){
       if ((*W)==Exceptions1[i][0]){
         if (i<11){
           size_t len=strlen(Exceptions1[i][1]);
           memcpy(&(*W).Letters[(*W).Start], Exceptions1[i][1], len);
-          (*W).End=(*W).Start+len-1;
+          (*W).End=(*W).Start+U8(len-1);
         }
         Hash(W);
         (*W).Type|=TypesExceptions1[i];
+        (*W).Language = Language::English;
         return (i<11);
       }
     }
@@ -3562,26 +3557,441 @@ public:
     // Start of modified Porter2 Stemmer
     MarkYsAsConsonants(W);
     U32 R1=GetRegion1(W), R2=GetRegion(W,R1);
-    if (Step0(W)) res = true;
-    if (Step1a(W)) res = true;
-    for (int i=0;i<NUM_EXCEPTIONS2;i++){
+    res|=Step0(W);
+    res|=Step1a(W);
+    for (int i=0; i<NUM_EXCEPTIONS2; i++){
       if ((*W)==Exceptions2[i]){
         Hash(W);
+        (*W).Type|=TypesExceptions2[i];
+        (*W).Language = Language::English;
         return res;
       }
     }
-    if (Step1b(W,R1)) res = true;
-    if (Step1c(W)) res = true;
-    if (Step2(W,R1)) res = true;
-    if (Step3(W,R1,R2)) res = true;
-    if (Step4(W,R2)) res = true;
-    if (Step5(W,R1,R2)) res = true;
+    res|=Step1b(W, R1);
+    res|=Step1c(W);
+    res|=Step2(W, R1);
+    res|=Step3(W, R1, R2);
+    res|=Step4(W, R2);
+    res|=Step5(W, R1, R2);
 
-    for (U8 i=(*W).Start;i<=(*W).End;i++){
+    for (U8 i=(*W).Start; i<=(*W).End; i++){
       if ((*W).Letters[i]=='Y')
         (*W).Letters[i]='y';
     }
+    if (!(*W).Type || (*W).Type==English::Plural) {
+      if ((*W).MatchesAny(MaleWords, NUM_MALE_WORDS))
+        res = true, (*W).Type|=English::Male;
+      else if ((*W).MatchesAny(FemaleWords, NUM_FEMALE_WORDS))
+        res = true, (*W).Type|=English::Female;
+    }
+    if (!res)
+      res=(*W).MatchesAny(CommonWords, NUM_COMMON_WORDS);
     Hash(W);
+    if (res)
+      (*W).Language = Language::English;
+    return res;
+  }
+};
+
+/*
+  French suffix stemmer, based on the Porter stemmer.
+
+  Changelog:
+  (28/01/2018) v133: Initial release by Márcio Pais
+  (04/02/2018) v135: Added processing of common words
+*/
+
+class FrenchStemmer: public Stemmer {
+private:
+  static const int NUM_VOWELS = 17;
+  const char Vowels[NUM_VOWELS]={'a','e','i','o','u','y','\xE2','\xE0','\xEB','\xE9','\xEA','\xE8','\xEF','\xEE','\xF4','\xFB','\xF9'};
+  static const int NUM_COMMON_WORDS = 10;
+  const char *CommonWords[NUM_COMMON_WORDS]={"de","la","le","et","en","un","une","du","que","pas"};
+  static const int NUM_EXCEPTIONS = 3;
+  const char *(Exceptions[NUM_EXCEPTIONS])[2]={
+    {"monument", "monument"},
+    {"yeux", "oeil"},
+    {"travaux", "travail"},
+  };
+  const U32 TypesExceptions[NUM_EXCEPTIONS]={
+    French::Noun,
+    French::Noun|French::Plural,
+    French::Noun|French::Plural
+  };
+  static const int NUM_SUFFIXES_STEP1 = 39;
+  const char *SuffixesStep1[NUM_SUFFIXES_STEP1]={
+    "ance","iqUe","isme","able","iste","eux","ances","iqUes","ismes","ables","istes", //11
+    "atrice","ateur","ation","atrices","ateurs","ations", //6
+    "logie","logies", //2
+    "usion","ution","usions","utions", //4
+    "ence","ences", //2
+    "issement","issements", //2
+    "ement","ements", //2
+    "it\xE9","it\xE9s", //2
+    "if","ive","ifs","ives", //4
+    "euse","euses", //2
+    "ment","ments" //2
+  };
+  static const int NUM_SUFFIXES_STEP2a = 35;
+  const char *SuffixesStep2a[NUM_SUFFIXES_STEP2a]={
+    "issaIent", "issantes", "iraIent", "issante",
+    "issants", "issions", "irions", "issais",
+    "issait", "issant", "issent", "issiez", "issons",
+    "irais", "irait", "irent", "iriez", "irons",
+    "iront", "isses", "issez", "\xEEmes",
+    "\xEEtes", "irai", "iras", "irez", "isse",
+    "ies", "ira", "\xEEt", "ie", "ir", "is",
+    "it", "i"
+  };
+  static const int NUM_SUFFIXES_STEP2b = 38;
+  const char *SuffixesStep2b[NUM_SUFFIXES_STEP2b]={
+    "eraIent", "assions", "erions", "assent",
+    "assiez", "\xE8rent", "erais", "erait",
+    "eriez", "erons", "eront", "aIent", "antes",
+    "asses", "ions", "erai", "eras", "erez",
+    "\xE2mes", "\xE2tes", "ante", "ants",
+    "asse", "\xE9""es", "era", "iez", "ais",
+    "ait", "ant", "\xE9""e", "\xE9s", "er",
+    "ez", "\xE2t", "ai", "as", "\xE9", "a"
+  };
+  static const int NUM_SET_STEP4 = 6;
+  const char SetStep4[NUM_SET_STEP4]={'a','i','o','u','\xE8','s'};
+  static const int NUM_SUFFIXES_STEP4 = 7;
+  const char *SuffixesStep4[NUM_SUFFIXES_STEP4]={"i\xE8re","I\xE8re","ion","ier","Ier","e","\xEB"};
+  static const int NUM_SUFFIXES_STEP5 = 5;
+  const char *SuffixesStep5[NUM_SUFFIXES_STEP5]={"enn","onn","ett","ell","eill"};
+  inline bool IsConsonant(const char c){
+    return !IsVowel(c);
+  }
+  void MarkVowelsAsConsonants(Word *W){
+    for (int i=(*W).Start; i<=(*W).End; i++){
+      switch ((*W).Letters[i]) {
+        case 'i': case 'u': {
+          if (i>(*W).Start && i<(*W).End && (IsVowel((*W).Letters[i-1]) || ((*W).Letters[i-1]=='q' && (*W).Letters[i]=='u')) && IsVowel((*W).Letters[i+1]))
+            (*W).Letters[i] = toupper((*W).Letters[i]);
+          break;
+        }
+        case 'y': {
+          if ((i>(*W).Start && IsVowel((*W).Letters[i-1])) || (i<(*W).End && IsVowel((*W).Letters[i+1])))
+            (*W).Letters[i] = toupper((*W).Letters[i]);
+        }
+      }
+    }
+  }
+  U32 GetRV(Word *W) {
+    U32 len = (*W).Length(), res = (*W).Start+len;
+    if (len>=3 && ((IsVowel((*W).Letters[(*W).Start]) && IsVowel((*W).Letters[(*W).Start+1])) || (*W).StartsWith("par") || (*W).StartsWith("col") || (*W).StartsWith("tap") ))
+      return (*W).Start+3;
+    else {
+      for (int i=(*W).Start+1;i<=(*W).End;i++) {
+        if (IsVowel((*W).Letters[i]))
+          return i+1;
+      }
+    }
+    return res;
+  }
+  U32 GetRegion(const Word *W, const U32 From){
+    bool hasVowel = false;
+    for (int i=(*W).Start+From; i<=(*W).End; i++){
+      if (IsVowel((*W).Letters[i])){
+        hasVowel = true;
+        continue;
+      }
+      else if (hasVowel)
+        return i-(*W).Start+1;
+    }
+    return (*W).Start+(*W).Length();
+  }
+  bool SuffixInRn(const Word *W, const U32 Rn, const char *Suffix){
+    return ((*W).Start!=(*W).End && Rn<=(*W).Length()-strlen(Suffix));
+  }
+  bool Step1(Word *W, const U32 RV, const U32 R1, const U32 R2, bool *ForceStep2a) {
+    int i = 0;
+    for (; i<11; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, R2, SuffixesStep1[i])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        if (i==3 /*able*/)
+          (*W).Type|=French::Adjective;
+        return true;
+      }
+    }
+    for (; i<17; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, R2, SuffixesStep1[i])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        if ((*W).EndsWith("ic"))
+          (*W).ChangeSuffix("c", "qU");
+        return true;
+      }
+    }
+    for (; i<25;i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, R2, SuffixesStep1[i])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]))-1-(i<19)*2;
+        if (i>22) {
+          (*W).End+=2;
+          (*W).Letters[(*W).End]='t';
+        }
+        return true;
+      }
+    }
+    for (; i<27; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, R1, SuffixesStep1[i]) && IsConsonant((*W).Letters[(*W).End-strlen(SuffixesStep1[i])])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        return true;
+      }
+    }
+    for (; i<29; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, RV, SuffixesStep1[i])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        if ((*W).EndsWith("iv") && SuffixInRn(W, R2, "iv")) {
+          (*W).End-=2;
+          if ((*W).EndsWith("at") && SuffixInRn(W, R2, "at"))
+            (*W).End-=2;
+        }
+        else if ((*W).EndsWith("eus")) {
+          if (SuffixInRn(W, R2, "eus"))
+            (*W).End-=3;
+          else if (SuffixInRn(W, R1, "eus"))
+            (*W).Letters[(*W).End]='x';
+        }
+        else if (((*W).EndsWith("abl") && SuffixInRn(W, R2, "abl")) || ((*W).EndsWith("iqU") && SuffixInRn(W, R2, "iqU")))
+          (*W).End-=3;
+        else if (((*W).EndsWith("i\xE8r") && SuffixInRn(W, RV, "i\xE8r")) || ((*W).EndsWith("I\xE8r") && SuffixInRn(W, RV, "I\xE8r"))){
+          (*W).End-=2;
+          (*W).Letters[(*W).End]='i';
+        }
+        return true;
+      }
+    }
+    for (; i<31; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, R2, SuffixesStep1[i])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        if ((*W).EndsWith("abil")) {
+          if (SuffixInRn(W, R2, "abil"))
+            (*W).End-=4;
+          else
+            (*W).End--, (*W).Letters[(*W).End]='l';
+        }
+        else if ((*W).EndsWith("ic")) {
+          if (SuffixInRn(W, R2, "ic"))
+            (*W).End-=2;
+          else
+            (*W).ChangeSuffix("c", "qU");
+        }
+        else if ((*W).EndsWith("iv") && SuffixInRn(W, R2, "iv"))
+          (*W).End-=2;
+        return true;
+      }
+    }
+    for (; i<35; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, R2, SuffixesStep1[i])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        if ((*W).EndsWith("at") && SuffixInRn(W, R2, "at")) {
+          (*W).End-=2;
+          if ((*W).EndsWith("ic")) {
+            if (SuffixInRn(W, R2, "ic"))
+              (*W).End-=2;
+            else
+              (*W).ChangeSuffix("c", "qU");
+          }
+        }
+        return true;
+      }
+    }
+    for (; i<37; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i])) {
+        if (SuffixInRn(W, R2, SuffixesStep1[i])) {
+          (*W).End-=U8(strlen(SuffixesStep1[i]));
+          return true;
+        }
+        else if (SuffixInRn(W, R1, SuffixesStep1[i])) {
+          (*W).ChangeSuffix(SuffixesStep1[i], "eux");
+          return true;
+        }
+      }
+    }
+    for (; i<NUM_SUFFIXES_STEP1; i++) {
+      if ((*W).EndsWith(SuffixesStep1[i]) && SuffixInRn(W, RV+1, SuffixesStep1[i]) && IsVowel((*W).Letters[(*W).End-strlen(SuffixesStep1[i])])) {
+        (*W).End-=U8(strlen(SuffixesStep1[i]));
+        (*ForceStep2a) = true;
+        return true;
+      }
+    }
+    if ((*W).EndsWith("eaux") || (*W)=="eaux") {
+      (*W).End--;
+      (*W).Type|=French::Plural;
+      return true;
+    }
+    else if ((*W).EndsWith("aux") && SuffixInRn(W, R1, "aux")) {
+      (*W).End--, (*W).Letters[(*W).End] = 'l';
+      (*W).Type|=French::Plural;
+      return true;
+    }
+    else if ((*W).EndsWith("amment") && SuffixInRn(W, RV, "amment")) {
+      (*W).ChangeSuffix("amment", "ant");
+      (*ForceStep2a) = true;
+      return true;
+    }
+    else if ((*W).EndsWith("emment") && SuffixInRn(W, RV, "emment")) {
+      (*W).ChangeSuffix("emment", "ent");
+      (*ForceStep2a) = true;
+      return true;
+    }
+    return false;
+  }
+  bool Step2a(Word *W, const U32 RV) {
+    for (int i=0; i<NUM_SUFFIXES_STEP2a; i++) {
+      if ((*W).EndsWith(SuffixesStep2a[i]) && SuffixInRn(W, RV+1, SuffixesStep2a[i]) && IsConsonant((*W).Letters[(*W).End-strlen(SuffixesStep2a[i])])) {
+        (*W).End-=U8(strlen(SuffixesStep2a[i]));
+        if (i==31 /*ir*/)
+          (*W).Type|=French::Verb;
+        return true;
+      }
+    }
+    return false;
+  }
+  bool Step2b(Word *W, const U32 RV, const U32 R2) {
+    for (int i=0; i<NUM_SUFFIXES_STEP2b; i++) {
+      if ((*W).EndsWith(SuffixesStep2b[i]) && SuffixInRn(W, RV, SuffixesStep2b[i])) {
+        switch (SuffixesStep2b[i][0]) {
+          case 'a': case '\xE2': {
+            (*W).End-=U8(strlen(SuffixesStep2b[i]));
+            if ((*W).EndsWith("e") && SuffixInRn(W, RV, "e"))
+              (*W).End--;
+            return true;
+          }
+          default: {
+            if (i!=14 || SuffixInRn(W, R2, SuffixesStep2b[i])) {
+              (*W).End-=U8(strlen(SuffixesStep2b[i]));
+              return true;
+            }
+          }
+        }        
+      }
+    }
+    return false;
+  }
+  void Step3(Word *W) {
+    char *final = (char *)&(*W).Letters[(*W).End];
+    if ((*final)=='Y')
+      (*final) = 'i';
+    else if ((*final)=='\xE7')
+      (*final) = 'c';
+  }
+  bool Step4(Word *W, const U32 RV, const U32 R2) {
+    bool res = false;
+    if ((*W).Length()>=2 && (*W).Letters[(*W).End]=='s' && !CharInArray((*W).Letters[(*W).End-1], SetStep4, NUM_SET_STEP4)) {
+      (*W).End--;
+      res = true;
+    }
+    for (int i=0; i<NUM_SUFFIXES_STEP4; i++) {
+      if ((*W).EndsWith(SuffixesStep4[i]) && SuffixInRn(W, RV, SuffixesStep4[i])) {
+        switch (i) {
+          case 2: { //ion
+            char prec = (*W).Letters[(*W).End-3];
+            if (SuffixInRn(W, R2, SuffixesStep4[i]) && SuffixInRn(W, RV+1, SuffixesStep4[i]) && (prec=='s' || prec=='t')) {
+              (*W).End-=3;
+              return true;
+            }
+            break;
+          }
+          case 5: { //e
+            (*W).End--;
+            return true;
+          }
+          case 6: { //\xEB
+            if ((*W).EndsWith("gu\xEB")) {
+              (*W).End--;
+              return true;
+            }
+            break;
+          }
+          default: {
+            (*W).ChangeSuffix(SuffixesStep4[i], "i");
+            return true;
+          }
+        }
+      }
+    }
+    return res;
+  }
+  bool Step5(Word *W) {
+    for (int i=0; i<NUM_SUFFIXES_STEP5; i++) {
+      if ((*W).EndsWith(SuffixesStep5[i])) {
+        (*W).End--;
+        return true;
+      }
+    }
+    return false;
+  }
+  bool Step6(Word *W) {
+    for (int i=(*W).End; i>=(*W).Start; i--) {
+      if (IsVowel((*W).Letters[i])) {
+        if (i<(*W).End && ((*W).Letters[i]&0xFE)==0xE8) {
+          (*W).Letters[i] = 'e';
+          return true;
+        }
+        return false;
+      }
+    }
+    return false;
+  }
+public:
+  inline bool IsVowel(const char c) final {
+    return CharInArray(c, Vowels, NUM_VOWELS);
+  }
+  inline void Hash(Word *W) final {
+    (*W).Hash[2] = (*W).Hash[3] = ~0xeff1cace;
+    for (int i=(*W).Start; i<=(*W).End; i++) {
+      U8 l = (*W).Letters[i];
+      (*W).Hash[2]=(*W).Hash[2]*251*32 + l;
+      if (IsVowel(l))
+        (*W).Hash[3]=(*W).Hash[3]*997*16 + l;
+      else if (l>='b' && l<='z')
+        (*W).Hash[3]=(*W).Hash[3]*271*32 + (l-97);
+      else
+        (*W).Hash[3]=(*W).Hash[3]*11*32 + l;
+    }
+  }
+  bool Stem(Word *W) {
+    if ((*W).Length()<2){
+      Hash(W);
+      return false;
+    }
+    else {
+      for (int i=0; i<NUM_EXCEPTIONS; i++){
+        if ((*W)==Exceptions[i][0]){
+          size_t len=strlen(Exceptions[i][1]);
+          memcpy(&(*W).Letters[(*W).Start], Exceptions[i][1], len);
+          (*W).End=(*W).Start+U8(len-1);
+          Hash(W);
+          (*W).Type|=TypesExceptions[i];
+          (*W).Language = Language::French;
+          return true;
+        }
+      }
+    }
+    MarkVowelsAsConsonants(W);
+    U32 RV=GetRV(W), R1=GetRegion(W, 0), R2=GetRegion(W, R1);
+    bool DoNextStep=false, res=Step1(W, RV, R1, R2, &DoNextStep);
+    DoNextStep|=!res;
+    if (DoNextStep) {
+      DoNextStep = !Step2a(W, RV);
+      res|=!DoNextStep;
+      if (DoNextStep)
+        res|=Step2b(W, RV, R2);
+    }
+    if (res)
+      Step3(W);
+    else
+      res|=Step4(W, RV, R2);
+    res|=Step5(W);
+    res|=Step6(W);
+    for (int i=(*W).Start; i<=(*W).End; i++)
+      (*W).Letters[i] = tolower((*W).Letters[i]);
+    if (!res)
+      res=(*W).MatchesAny(CommonWords, NUM_COMMON_WORDS);
+    if (res)
+      (*W).Language = Language::French;
     return res;
   }
 };
@@ -3590,6 +4000,411 @@ public:
 
 // All of the models below take a Mixer as a parameter and write
 // predictions to it.
+
+template <class T, const U32 Size> class Cache {
+  static_assert(Size>1 && (Size&(Size-1))==0, "Cache size must be a power of 2 bigger than 1");
+private:
+  Array<T> Data;
+  U32 Index;
+public:
+  explicit Cache() : Data(Size) { Index=0; }
+  T& operator()(U32 i) {
+    return Data[(Index-i)&(Size-1)];
+  }
+  void operator++(int) {
+    Index++;
+  }
+  void operator--(int) {
+    Index--;
+  }
+  T& Next() {
+    return Index++, *((T*)memset(&Data[Index&(Size-1)], 0, sizeof(T)));
+  }
+};
+
+/*
+  Text model
+
+  Changelog:
+  (04/02/2018) v135: Initial release by Márcio Pais
+  (11/02/2018) v136: Uses 16 contexts, sets 3 mixer contexts
+*/
+
+class TextModel {
+private:
+  const U32 MIN_RECOGNIZED_WORDS = 4;
+  ContextMap2 Map;
+  Array<Stemmer*> Stemmers;
+  Array<Language*> Languages;
+  Cache<Word, 8> Words[Language::Count];
+  Cache<Segment, 4> Segments;
+  Cache<Sentence, 4> Sentences;
+  Cache<Paragraph, 2> Paragraphs;
+  Array<U32> WordPos;
+  U32 BytePos[256];
+  Word *cWord, *pWord; // current word, previous word
+  Segment *cSegment; // current segment
+  Sentence *cSentence; // current sentence
+  Paragraph *cParagraph; // current paragraph
+  enum Parse {
+    Unknown,
+    ReadingWord,
+    PossibleHyphenation,
+    WasAbbreviation,
+    AfterComma,
+    AfterQuote,
+    AfterAbbreviation,
+    ExpectDigit
+  } State, pState;
+  struct {
+    U32 Count[Language::Count-1]; // number of recognized words of each language in the last 64 words seen
+    U64 Mask[Language::Count-1];  // binary mask with the recognition status of the last 64 words for each language
+    int Id;  // current language detected
+    int pId; // detected language of the previous word
+  } Lang;
+  struct {
+    U64 numbers[2];   // last 2 numbers seen
+    U32 numHashes[2]; // hashes of the last 2 numbers seen
+    U8  numLength[2]; // digit length of last 2 numbers seen
+    U32 numMask;      // binary mask of the results of the arithmetic comparisons between the numbers seen
+    U32 numDiff;      // log2 of the consecutive differences between the last 16 numbers seen, clipped to 2 bits per difference
+    U32 lastUpper;    // distance to last uppercase letter
+    U32 maskUpper;    // binary mask of uppercase letters seen (in the last 32 bytes)
+    U32 lastLetter;   // distance to last letter
+    U32 lastDigit;    // distance to last digit
+    U32 lastPunct;    // distance to last punctuation character
+    U32 lastNewLine;  // distance to last new line character
+    U32 prevNewLine;  // distance to penultimate new line character
+    U32 wordGap;      // distance between the last words
+    U32 spaces;       // binary mask of whitespace characters seen (in the last 32 bytes)
+    U32 spaceCount;   // count of whitespace characters seen (in the last 32 bytes)
+    U32 commas;       // number of commas seen in this line (not this segment/sentence)
+    U32 quoteLength;  // length (in words) of current quote
+    U32 maskPunct;    // mask of relative position of last comma related to other punctuation
+    U32 nestHash;     // hash representing current nesting state
+    U32 lastNest;     // distance to last nesting character
+    U32 masks[4],
+        wordLength[2];
+    int UTF8Remaining;// remaining bytes for current UTF8-encoded Unicode code point (-1 if invalid byte found)
+    U8 firstLetter;   // first letter of current word
+    U8 firstChar;     // first character of current line
+    U8 expectedDigit; // next expected digit of detected numerical sequence
+  } Info;
+  U32 ParseCtx;
+  void Update(Buf& buffer, ModelStats *Stats = nullptr);
+  void SetContexts(Buf& buffer, ModelStats *Stats = nullptr);
+public:
+  TextModel(const U32 Size) : Map(Size, 16), Stemmers(Language::Count-1), Languages(Language::Count-1), WordPos(0x10000), State(Parse::Unknown), pState(State), Lang{ 0, 0, Language::Unknown, Language::Unknown }, Info{ 0 }, ParseCtx(0) {
+    Stemmers[Language::English-1] = new EnglishStemmer();
+    Stemmers[Language::French-1] = new FrenchStemmer();
+    Languages[Language::English-1] = new English();
+    Languages[Language::French-1] = new French();
+    cWord = &Words[Lang.Id](0);
+    pWord = &Words[Lang.Id](1);
+    cSegment = &Segments(0);
+    cSentence = &Sentences(0);
+    cParagraph = &Paragraphs(0);
+    memset(&BytePos[0], 0, 256*sizeof(U32));
+  }
+  void Predict(Mixer& mixer, Buf& buffer, ModelStats *Stats = nullptr) {
+    if (bpos==0) {
+      Update(buffer, Stats);
+      SetContexts(buffer, Stats);
+    }
+    Map.mix(mixer);
+    mixer.set(hash((Lang.Id!=Language::Unknown)?1+Stemmers[Lang.Id-1]->IsVowel(buffer(1)):0, Info.masks[1]&0xFF, c0)&0x3FF, 1024);
+    mixer.set(hash(ilog2(Info.wordLength[0]+1), c0,
+      (Info.lastDigit<Info.wordLength[0]+Info.wordGap)|
+      ((Info.lastUpper<Info.lastLetter+Info.wordLength[1])<<1)|
+      ((Info.lastPunct<Info.wordLength[0]+Info.wordGap)<<2)|
+      ((Info.lastUpper<Info.wordLength[0])<<3)
+    )&0x3FF, 1024);
+    mixer.set(hash(Info.masks[1]&0x3FF, Info.lastUpper<Info.wordLength[0], Info.lastUpper<Info.lastLetter+Info.wordLength[1])&0x7FF, 2048);
+  }
+};
+
+void TextModel::Update(Buf& buffer, ModelStats *Stats) {
+  Info.lastUpper  = min(0xFF, Info.lastUpper+1), Info.maskUpper<<=1;
+  Info.lastLetter = min(0x1F, Info.lastLetter+1);
+  Info.lastDigit  = min(0xFF, Info.lastDigit+1);
+  Info.lastPunct  = min(0x3F, Info.lastPunct+1);
+  Info.lastNewLine++, Info.prevNewLine++, Info.lastNest++;
+  Info.spaceCount-=(Info.spaces>>31), Info.spaces<<=1;
+  Info.masks[0]<<=2, Info.masks[1]<<=2, Info.masks[2]<<=4, Info.masks[3]<<=3;
+  pState = State;  
+
+  U8 c = buffer(1), pC=tolower(c);
+  BytePos[c] = pos;
+  if (c!=pC) {
+    c = pC;
+    Info.lastUpper = 0, Info.maskUpper|=1;
+  }
+  pC = buffer(2);
+  ParseCtx = hash(State=Parse::Unknown, pWord->Hash[1], c, (ilog2(Info.lastNewLine)+1)*(Info.lastNewLine*3>Info.prevNewLine), Info.masks[1]&0xFC);
+
+  if ((c>='a' && c<='z') || c=='\'' || c=='-' || c>0x7F) {    
+    if (Info.wordLength[0]==0) {
+      // check for hyphenation with "+"
+      if (pC==NEW_LINE && ((Info.lastLetter==3 && buffer(3)=='+') || (Info.lastLetter==4 && buffer(3)==CARRIAGE_RETURN && buffer(4)=='+'))) {
+        Info.wordLength[0] = Info.wordLength[1];
+        for (int i=Language::Unknown; i<Language::Count; i++)
+          Words[i]--;
+        cWord = pWord, pWord = &Words[Lang.pId](1);
+        memset(cWord, 0, sizeof(Word));
+        for (U32 i=0; i<Info.wordLength[0]; i++)
+          (*cWord)+=buffer(Info.wordLength[0]-i+Info.lastLetter);
+        Info.wordLength[1] = (*pWord).Length();
+        cSegment->WordCount--;
+        cSentence->WordCount--;
+      }
+      else {
+        Info.wordGap = Info.lastLetter;
+        Info.firstLetter = c;
+      }
+    }
+    Info.lastLetter = 0;
+    Info.wordLength[0]++;
+    Info.masks[0]+=(Lang.Id!=Language::Unknown)?1+Stemmers[Lang.Id-1]->IsVowel(c):1, Info.masks[1]++, Info.masks[3]+=Info.masks[0]&3;
+    if (c=='\'') {
+      Info.masks[2]+=12;
+      if (Info.wordLength[0]==1) {
+        if (Info.quoteLength==0 && pC==SPACE)
+          Info.quoteLength = 1;
+        else if (Info.quoteLength>0 && Info.lastPunct==1) {
+          Info.quoteLength = 0;
+          ParseCtx = hash(State=Parse::AfterQuote, pC);
+        }
+      }
+    }
+    (*cWord)+=c;
+    cWord->GetHashes();
+    ParseCtx = hash(State=Parse::ReadingWord, cWord->Hash[1]);
+  }
+  else {
+    if (cWord->Length()>0) {
+      if (Lang.Id!=Language::Unknown)
+        memcpy(&Words[Language::Unknown](0), cWord, sizeof(Word));
+
+      for (int i=Language::Count-1; i>Language::Unknown; i--) {
+        Lang.Count[i-1]-=(Lang.Mask[i-1]>>63), Lang.Mask[i-1]<<=1;
+        if (i!=Lang.Id)
+          memcpy(&Words[i](0), cWord, sizeof(Word));
+        if (Stemmers[i-1]->Stem(&Words[i](0)))
+          Lang.Count[i-1]++, Lang.Mask[i-1]|=1;
+      }      
+      Lang.Id = Language::Unknown;
+      U32 best = MIN_RECOGNIZED_WORDS;
+      for (int i=Language::Count-1; i>Language::Unknown; i--) {
+        if (Lang.Count[i-1]>=best) {
+          best = Lang.Count[i-1] + (i==Lang.pId); //bias to prefer the previously detected language
+          Lang.Id = i;
+        }
+        Words[i]++;
+      }
+      Words[Language::Unknown]++;
+    #ifndef NDEBUG
+      if (Lang.Id!=Lang.pId) {
+        switch (Lang.Id) {
+          case Language::Unknown: { printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b[Language: Unknown, blpos: %d]\n",blpos); break; };
+          case Language::English: { printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b[Language: English, blpos: %d]\n",blpos); break; };
+          case Language::French : { printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b[Language: French, blpos: %d]\n",blpos);  break; };
+        }
+      }
+    #endif
+      Lang.pId = Lang.Id;
+      pWord = &Words[Lang.Id](1), cWord = &Words[Lang.Id](0);
+      memset(cWord, 0, sizeof(Word));
+      WordPos[pWord->Hash[1]&(WordPos.size()-1)] = pos;
+      if (cSegment->WordCount==0)
+        memcpy(&cSegment->FirstWord, pWord, sizeof(Word));
+      cSegment->WordCount++;
+      if (cSentence->WordCount==0)
+        memcpy(&cSentence->FirstWord, pWord, sizeof(Word));
+      cSentence->WordCount++;
+      Info.wordLength[1] = Info.wordLength[0], Info.wordLength[0] = 0;
+      Info.quoteLength+=(Info.quoteLength>0);
+      if (Info.quoteLength>0x1F)
+        Info.quoteLength = 0;
+    }
+    bool skip = false;
+    switch (c) {
+      case '.': {
+        if (Lang.Id!=Language::Unknown && Info.lastUpper==Info.wordLength[1] && Languages[Lang.Id-1]->IsAbbreviation(pWord)) {
+          ParseCtx = hash(State=Parse::WasAbbreviation, pWord->Hash[1]);
+          break;
+        }
+      }
+      case '?': case '!': {
+        cSentence->Type = (c=='.')?Sentence::Types::Declarative:(c=='?')?Sentence::Types::Interrogative:Sentence::Types::Exclamative;
+        cSentence->SegmentCount++;
+        cParagraph->SentenceCount++;
+        cParagraph->TypeCount[cSentence->Type]++;
+        cParagraph->TypeMask<<=2, cParagraph->TypeMask|=cSentence->Type;
+        cSentence = &Sentences.Next();
+        Info.masks[3]+=3;
+        skip = true;
+      }
+      case ',': case ';': case ':': {
+        if (c==',') {
+          Info.commas++;
+          ParseCtx = hash(State=Parse::AfterComma, ilog2(Info.quoteLength+1), ilog2(Info.lastNewLine), Info.lastUpper<Info.lastLetter+Info.wordLength[1]);
+        }
+        if (!skip) {
+          cSentence->SegmentCount++;
+          Info.masks[3]+=4;
+        }
+        Info.lastPunct = 0;
+        Info.masks[0]+=3, Info.masks[1]+=2, Info.masks[2]+=15;
+        cSegment = &Segments.Next();
+        break;
+      }
+      case NEW_LINE: {
+        Info.prevNewLine = Info.lastNewLine, Info.lastNewLine = 0;
+        Info.commas = 0;
+        if (Info.prevNewLine==1 || (Info.prevNewLine==2 && pC==CARRIAGE_RETURN))
+          cParagraph = &Paragraphs.Next();
+        else if ((Info.lastLetter==2 && pC=='+') || (Info.lastLetter==3 && pC==CARRIAGE_RETURN && buffer(3)=='+'))
+          ParseCtx = hash(Parse::ReadingWord, pWord->Hash[1]), State=Parse::PossibleHyphenation;
+      }
+      case TAB: case CARRIAGE_RETURN: case SPACE: {
+        Info.spaceCount++, Info.spaces|=1;
+        Info.masks[1]+=3, Info.masks[3]+=5;
+        if (c==SPACE && pState==Parse::WasAbbreviation) {
+          ParseCtx = hash(State=Parse::AfterAbbreviation, pWord->Hash[1]);
+        }
+        break;
+      }
+      case '(' : Info.masks[2]+=1; Info.masks[3]+=6; Info.nestHash+=31; Info.lastNest=0; break;
+      case '[' : Info.masks[2]+=2; Info.nestHash+=11; Info.lastNest=0; break;
+      case '{' : Info.masks[2]+=3; Info.nestHash+=17; Info.lastNest=0; break;
+      case '<' : Info.masks[2]+=4; Info.nestHash+=23; Info.lastNest=0; break;
+      case 0xAB: Info.masks[2]+=5; break;
+      case ')' : Info.masks[2]+=6; Info.nestHash-=31; Info.lastNest=0; break;
+      case ']' : Info.masks[2]+=7; Info.nestHash-=11; Info.lastNest=0; break;
+      case '}' : Info.masks[2]+=8; Info.nestHash-=17; Info.lastNest=0; break;
+      case '>' : Info.masks[2]+=9; Info.nestHash-=23; Info.lastNest=0; break;
+      case 0xBB: Info.masks[2]+=10; break;
+      case '"': {
+        Info.masks[2]+=11;
+        // start/stop counting
+        if (Info.quoteLength==0)
+          Info.quoteLength = 1;
+        else {
+          Info.quoteLength = 0;
+          ParseCtx = hash(State=Parse::AfterQuote, 0x100|pC);
+        }
+        break;
+      }
+      case '/' : case '-': case '+': case '*': case '=': case '%': Info.masks[2]+=13; break;
+      case '\\': case '|': case '_': case '@': case '&': case '^': Info.masks[2]+=14; break;
+    }
+    if (c>='0' && c<='9') {
+      Info.numbers[0] = Info.numbers[0]*10 + (c&0xF), Info.numLength[0] = min(19, Info.numLength[0]+1);
+      Info.numHashes[0] = hash(Info.numHashes[0], c, Info.numLength[0]);
+      Info.expectedDigit = -1;
+      if (Info.numLength[0]<Info.numLength[1] && (pState==Parse::ExpectDigit || ((Info.numDiff&3)==0 && Info.numLength[0]<=1))) {
+        U64 ExpectedNum = Info.numbers[1]+(Info.numMask&3)-2, PlaceDivisor=1;
+        for (int i=0; i<Info.numLength[1]-Info.numLength[0]; i++, PlaceDivisor*=10);
+        if (ExpectedNum/PlaceDivisor==Info.numbers[0]) {
+          PlaceDivisor/=10;
+          Info.expectedDigit = (ExpectedNum/PlaceDivisor)%10;
+          State = Parse::ExpectDigit;
+        }
+      }
+      else {
+        U8 d = buffer(Info.numLength[0]+2);
+        if (Info.numLength[0]<3 && buffer(Info.numLength[0]+1)==',' && d>='0' && d<='9')
+          State = Parse::ExpectDigit;
+      }
+      Info.lastDigit = 0;
+      Info.masks[3]+=7;
+    }
+    else if (Info.numbers[0]>0) {
+      Info.numMask<<=2, Info.numMask|=1+(Info.numbers[0]>=Info.numbers[1])+(Info.numbers[0]>Info.numbers[1]);
+      Info.numDiff<<=2, Info.numDiff|=min(3,ilog2(abs((int)(Info.numbers[0]-Info.numbers[1]))));
+      Info.numbers[1] = Info.numbers[0], Info.numbers[0] = 0;
+      Info.numHashes[1] = Info.numHashes[0], Info.numHashes[0] = 0;
+      Info.numLength[1] = Info.numLength[0], Info.numLength[0] = 0;
+      cSegment->NumCount++, cSentence->NumCount++;
+    }
+  }
+  if (Info.lastNewLine==1)
+    Info.firstChar = (Lang.Id!=Language::Unknown)?c:min(c,96);
+  if (Info.lastNest>512)
+    Info.nestHash = 0;
+  int leadingBitsSet = 0;
+  while (((c>>(7-leadingBitsSet))&1)!=0) leadingBitsSet++;
+
+  if (Info.UTF8Remaining>0 && leadingBitsSet==1)
+    Info.UTF8Remaining--;
+  else
+    Info.UTF8Remaining = (leadingBitsSet!=1)?(c!=0xC0 && c!=0xC1 && c<0xF5)?(leadingBitsSet-(leadingBitsSet>0)):-1:0;
+  Info.maskPunct = (BytePos[',']>BytePos['.'])|((BytePos[',']>BytePos['!'])<<1)|((BytePos[',']>BytePos['?'])<<2)|((BytePos[',']>BytePos[':'])<<3)|((BytePos[',']>BytePos[';'])<<4);
+}
+
+void TextModel::SetContexts(Buf& buffer, ModelStats *Stats) {
+  U8 c = buffer(1), lc = tolower(c), m2 = Info.masks[2]&0xF, column = min(0xFF, Info.lastNewLine);;
+  U16 w = ((State==Parse::ReadingWord)?cWord->Hash[1]:pWord->Hash[1])&0xFFFF;
+  int i = State<<6;
+
+  Map.set(ParseCtx);
+  Map.set(hash(i++, cWord->Hash[0], pWord->Hash[0],
+    (Info.lastUpper<Info.wordLength[0])|
+    ((Info.lastDigit<Info.wordLength[0]+Info.wordGap)<<1)
+  )); 
+  Map.set(hash(i++, cWord->Hash[1], Words[Lang.pId](2).Hash[1], min(10,ilog2((U32)Info.numbers[0])),
+    (Info.lastUpper<Info.lastLetter+Info.wordLength[1])|
+    ((Info.lastLetter>3)<<1)|
+    ((Info.lastLetter>0 && Info.wordLength[1]<3)<<2)
+  ));
+  Map.set(hash(i++, cWord->Hash[1]&0xFFF, Info.masks[1]&0x3FF, Words[Lang.pId](3).Hash[2],
+    (Info.lastDigit<Info.wordLength[0]+Info.wordGap)|
+    ((Info.lastUpper<Info.lastLetter+Info.wordLength[1])<<1)|
+    ((Info.spaces&0x7F)<<2)
+  ));
+  Map.set(hash(i++, cWord->Hash[1], pWord->Hash[3], Words[Lang.pId](2).Hash[3]));
+  Map.set(hash(i++, pWord->Hash[2], Info.masks[1]&0xFC, lc, Info.wordGap));
+  Map.set(hash(i++, (Info.lastLetter==0)?cWord->Hash[1]:pWord->Hash[1], c, cSegment->FirstWord.Hash[2], min(3,ilog2(cSegment->WordCount+1))));
+  Map.set(hash(i++, cWord->Hash[1], c, Segments(1).FirstWord.Hash[3]));
+  Map.set(hash(i++, max(31,lc), Info.masks[1]&0xFFC, (Info.spaces&0xFE)|(Info.lastPunct<Info.lastLetter), (Info.maskUpper&0xFF)|(((0x100|Info.firstLetter)*(Info.wordLength[0]>1))<<8)));
+  Map.set(hash(i++, column, min(7,ilog2(Info.lastUpper+1)), ilog2(Info.lastPunct+1)));
+  Map.set(
+    (column&0xF8)|(Info.masks[1]&3)|((Info.prevNewLine-Info.lastNewLine>63)<<2)|
+    (min(3, Info.lastLetter)<<8)|
+    (Info.firstChar<<10)|
+    ((Info.commas>4)<<18)|
+    ((m2>=1 && m2<=5)<<19)|
+    ((m2>=6 && m2<=10)<<20)|
+    ((m2==11 || m2==12)<<21)|
+    ((Info.lastUpper<column)<<22)|
+    ((Info.lastDigit<column)<<23)|
+    ((column<Info.prevNewLine-Info.lastNewLine)<<24)
+  );
+  Map.set(hash(
+    (2*column)/3,
+    min(13, Info.lastPunct)+(Info.lastPunct>16)+(Info.lastPunct>32)+Info.maskPunct*16,
+    ilog2(Info.lastUpper+1),
+    ilog2(Info.prevNewLine-Info.lastNewLine),
+    ((Info.masks[1]&3)==0)|
+    ((m2<6)<<1)|
+    ((m2<11)<<2)
+  ));
+  Map.set(hash(i++, column>>1, Info.spaces&0xF));
+  Map.set(hash(
+    Info.masks[3]&0x3F,
+    min((max(Info.wordLength[0],3)-2)*(Info.wordLength[0]<8),3),
+    Info.firstLetter*(Info.wordLength[0]<5),
+    w&0x3FF,
+    (c==buffer(2))|
+    ((Info.masks[2]>0)<<1)|
+    ((Info.lastPunct<Info.wordLength[0]+Info.wordGap)<<2)|
+    ((Info.lastUpper<Info.wordLength[0])<<3)|
+    ((Info.lastDigit<Info.wordLength[0]+Info.wordGap)<<4)|
+    ((Info.lastPunct<2+Info.wordLength[0]+Info.wordGap+Info.wordLength[1])<<5)
+  ));
+  Map.set(hash(i++, w, c, Info.numHashes[1]));
+  Map.set(hash(i++, w, c, llog(pos-WordPos[w])>>1));
+}
 
 //////////////////////////// matchModel ///////////////////////////
 
@@ -3654,7 +4469,7 @@ int matchModel(Mixer& m) {
 }
 
 //////////////////////////// wordModel /////////////////////////
-
+//#define USE_WORD_MODEL // uncomment to use both the textModel and the wordModel concurrently
 // Model English text (words and columns/end of line)
 static U32 frstchar=0, spafdo=0, spaces=0, spacecount=0, words=0, wordcount=0,wordlen=0,wordlen1=0;
 void wordModel(Mixer& m, Filetype filetype) {
@@ -3683,7 +4498,7 @@ void wordModel(Mixer& m, Filetype filetype) {
     lastLetter=min(lastLetter+1,63);
     mask2<<=2;
     if (c>='A' && c<='Z') c+='a'-'A', lastUpper=0;
-    if ((c>='a' && c<='z') || c=='\'' || c=='-')
+    if ((c>='a' && c<='z') || c=='\'' || c=='-' || c>127)
       (*cWord)+=c;
     else if ((*cWord).Length()>0){
       StemmerEN.Stem(cWord);
@@ -3694,7 +4509,7 @@ void wordModel(Mixer& m, Filetype filetype) {
     }
     if ((c>='a' && c<='z') || c==1 || c==2 ||(c>=128 &&(b2!=3))) {
       if (!wordlen){
-        // model syllabification with "+"
+        // model hyphenation with "+"
         if ((lastLetter==3 && (c4&0xFFFF00)==0x2B0A00) || (lastLetter==4 && (c4&0xFFFFFF00)==0x2B0D0A00)){
           word0 = word1;
           wordlen = wordlen1;
@@ -3704,7 +4519,7 @@ void wordModel(Mixer& m, Filetype filetype) {
             pWord=&StemWords[(StemIndex-1)&3];
             memset(cWord, 0, sizeof(Word));
             for (U32 i=0;i<=wordlen;i++)
-              (*cWord)+=tolower(buf(wordlen-i+1+2*(i!=wordlen)));
+              (*cWord)+=buf(wordlen-i+1+(lastLetter-1)*(i!=wordlen));
           }
         }
         else{
@@ -3847,7 +4662,7 @@ void wordModel(Mixer& m, Filetype filetype) {
     ));
     cm.set(hash(col,wordlen1,above&0x5F,c4&0x5F));
     cm.set(hash( mask2&0x3F, wrdhsh&0xFFF, (0x100|firstLetter)*(wordlen<6),(wordGap>4)*2+(wordlen1>5)) );
-    cm.set(hash((*pWord).Hash, h));
+    cm.set(hash((*pWord).Hash[2], h));
   }
   cm.mix(m);
 }
@@ -3875,8 +4690,6 @@ inline U8 LogMeanDiffQt(const U8 a, const U8 b){
   return sign | ilog2((a+b)/max(2,abs(a-b)*2)+1);
 }
 
-#define SPACE 0x20
-
 struct dBASE {
   U8 Version;
   U32 nRecords;
@@ -3884,7 +4697,7 @@ struct dBASE {
   int Start, End;
 };
 
-void recordModel(Mixer& m, Filetype filetype, ModelStats *Stats = NULL) {
+void recordModel(Mixer& m, Filetype filetype, ModelStats *Stats = nullptr) {
   static int cpos1[256] , cpos2[256], cpos3[256], cpos4[256];
   static int wpos1[0x10000]; // buf(1..2) -> last position
   static int rlen[3] = {2,3,4}; // run length and 2 candidates
@@ -4463,9 +5276,9 @@ void im24bitModel(Mixer& m, int info, int alpha=0, int isPNG=0) {
 
 // Model for 8-bit image data
 void im8bitModel(Mixer& m, int w, int gray = 0, int isPNG=0) {
-  static const int nMaps = 56;
+  static const int nMaps = 57;
   static ContextMap cm(MEM*4, 49);
-  static StationaryMap Map[nMaps] = { 12, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0 };
+  static StationaryMap Map[nMaps] = { 12, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 0 };
   static RingBuffer buffer(0x100000); // internal rotating buffer for PNG unfiltered pixel data
   static Array<short> jumps(0x8000);
   static U8 WWW, WW, W, NWW, NW, N, NE, NEE, NNWW, NNW, NN, NNE, NNEE, NNN; //pixel neighborhood
@@ -4539,7 +5352,7 @@ void im8bitModel(Mixer& m, int w, int gray = 0, int isPNG=0) {
           U8 bMask = 0xFF-((1<<gray)-1);
           U32 pMask = bMask*0x01010101u;
           U32 left=0, right=0;
-          int l=min(w, jumps.size()), end=l-4;
+          int l=min(w, (int)jumps.size()), end=l-4;
           do {
             left = ((buffer(l-x)<<24)|(buffer(l-x-1)<<16)|(buffer(l-x-2)<<8)|buffer(l-x-3))&pMask;
             int i = end;
@@ -4576,7 +5389,7 @@ void im8bitModel(Mixer& m, int w, int gray = 0, int isPNG=0) {
       column[1]=(x-isPNG)/columns[1];
       WWW=buffer(3), WW=buffer(2), W=buffer(1), NWW=buffer(w+2), NW=buffer(w+1), N=buffer(w), NE=buffer(w-1), NEE=buffer(w-2), NNWW=buffer(w*2+2), NNW=buffer(w*2+1), NN=buffer(w*2), NNE=buffer(w*2-1), NNEE=buffer(w*2-2), NNN=buffer(w*3);
 
-      jump = jumps[min(x,jumps.size()-1)];
+      jump = jumps[min(x,(int)jumps.size()-1)];
       cm.set(hash(++i, (jump!=0)?(0x100|buffer(abs(jump)))*(1-2*(jump<0)):N, line&3));
       if (!gray){
         cm.set(hash(++i, W, px));
@@ -4714,6 +5527,7 @@ void im8bitModel(Mixer& m, int w, int gray = 0, int isPNG=0) {
         Map[52].set(Clip((-buffer(5)+4*buffer(4)-5*WWW+5*W+Clip(NE*2-NNE))/4)-px);
         Map[53].set(Clip((WWW-4*WW+6*W+Clip(NE*3-NNE*3+buffer(w*3-1)))/4)-px);
         Map[54].set(Clip((-NNEE+3*NE+Clip(W*4-NW*6+NNW*4-buffer(w*3+1)))/3)-px);
+        Map[55].set(((W+N)*3-NW*2)/4-px);
 
         if (isPNG)
           ctx = ((abs(W-N)>8)<<10)|((W>N)<<9)|((abs(N-NW)>8)<<8)|((N>NW)<<7)|((abs(N-NE)>8)<<6)|((N>NE)<<5)|((W>WW)<<4)|((N>NN)<<3)|min(5,filterOn?filter+1:0);
@@ -5582,7 +6396,7 @@ int jpegModel(Mixer& m) {
   m.add((pr>>2)-511);
   m.set(1 + ((zu+zv<5) | ((huffbits>8)<<1) | (firstcol<<2)), 1+8);
   m.set(1 + ((hc&0xFF) | (min(3,(zu+zv)/3))<<8), 1+1024);
-  m.set(coef+256*min(3,huffbits/2), 1024);
+  m.set(coef | (min(3,huffbits/2)<<8), 1024);
   return true;
 }
 
@@ -5630,7 +6444,7 @@ inline int X2(int i) {
 #define F_(k,l,chn)(F[2*(49*(k)+l)+chn])
 #define L_(i,k)(L[49*(i)+k])
 
-void wavModel(Mixer& m, int info, ModelStats *Stats = NULL) {
+void wavModel(Mixer& m, int info, ModelStats *Stats = nullptr) {
   static int col=0;
   static Array<int> pr{3*2}; // [3][2]
   static Array<int> counter{2};
@@ -5832,7 +6646,7 @@ enum InstructionFormat {
 };
 
 // 1 byte opcodes
-const static U8 Table1[256] = {
+static const U8 Table1[256] = {
   // 0       1       2       3       4       5       6       7       8       9       a       b       c       d       e       f
   fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fNM|fBI,fNM|fDI,fNM|fNI,fNM|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fNM|fBI,fNM|fDI,fNM|fNI,fNM|fNI, // 0
   fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fNM|fBI,fNM|fDI,fNM|fNI,fNM|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fNM|fBI,fNM|fDI,fNM|fNI,fNM|fNI, // 1
@@ -5856,7 +6670,7 @@ const static U8 Table1[256] = {
 };
 
 // 2 byte opcodes
-const static U8 Table2[256] = {
+static const U8 Table2[256] = {
   // 0       1       2       3       4       5       6       7       8       9       a       b       c       d       e       f
   fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fNM|fNI,fERR   ,fNM|fNI,fNM|fNI,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   , // 0
   fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   , // 1
@@ -5880,7 +6694,7 @@ const static U8 Table2[256] = {
 };
 
 // 3 byte opcodes 0F38XX
-const static U8 Table3_38[256] = {
+static const U8 Table3_38[256] = {
   // 0       1       2       3       4       5       6       7       8       9       a       b       c       d       e       f
   fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fERR   ,fERR   ,fERR   ,fERR   , // 0
   fMR|fNI,fERR   ,fERR   ,fERR   ,fMR|fNI,fMR|fNI,fERR   ,fMR|fNI,fERR   ,fERR   ,fERR   ,fERR   ,fMR|fNI,fMR|fNI,fMR|fNI,fERR   , // 1
@@ -5901,7 +6715,7 @@ const static U8 Table3_38[256] = {
 };
 
 // 3 byte opcodes 0F3AXX
-const static U8 Table3_3A[256] = {
+static const U8 Table3_3A[256] = {
   // 0       1       2       3       4       5       6       7       8       9       a       b       c       d       e       f
   fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fMR|fBI,fMR|fBI,fMR|fBI,fMR|fBI,fMR|fBI,fMR|fBI,fMR|fBI,fMR|fBI, // 0
   fERR   ,fERR   ,fERR   ,fERR   ,fMR|fBI,fMR|fBI,fMR|fBI,fMR|fBI,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   ,fERR   , // 1
@@ -5922,7 +6736,7 @@ const static U8 Table3_3A[256] = {
 };
 
 // escape opcodes using ModRM byte to get more variants
-const static U8 TableX[32] = {
+static const U8 TableX[32] = {
   // 0       1       2       3       4       5       6       7
   fMR|fBI,fERR   ,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI, // escapes for 0xf6
   fMR|fDI,fERR   ,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI,fMR|fNI, // escapes for 0xf7
@@ -5930,8 +6744,8 @@ const static U8 TableX[32] = {
   fMR|fNI,fMR|fNI,fMR|fNI,fERR   ,fMR|fNI,fERR   ,fMR|fNI,fERR   , // escapes for 0xff
 };
 
-const static U8 InvalidX64Ops[19] = {0x06, 0x07, 0x16, 0x17, 0x1E, 0x1F, 0x27, 0x2F, 0x37, 0x3F, 0x60, 0x61, 0x62, 0x82, 0x9A, 0xD4, 0xD5, 0xD6, 0xEA,};
-const static U8 X64Prefixes[8] = {0x26, 0x2E, 0x36, 0x3E, 0x9B, 0xF0, 0xF2, 0xF3,};
+static const U8 InvalidX64Ops[19] = {0x06, 0x07, 0x16, 0x17, 0x1E, 0x1F, 0x27, 0x2F, 0x37, 0x3F, 0x60, 0x61, 0x62, 0x82, 0x9A, 0xD4, 0xD5, 0xD6, 0xEA,};
+static const U8 X64Prefixes[8] = {0x26, 0x2E, 0x36, 0x3E, 0x9B, 0xF0, 0xF2, 0xF3,};
 
 enum InstructionCategory {
   OP_INVALID              =  0,
@@ -5968,7 +6782,7 @@ enum InstructionCategory {
   OP_SSE_DATAMOV          = 31,
 };
 
-const static U8 TypeOp1[256] = {
+static const U8 TypeOp1[256] = {
   OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  , //03
   OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  , OP_GEN_STACK         , OP_GEN_STACK         , //07
   OP_GEN_LOGICAL       , OP_GEN_LOGICAL       , OP_GEN_LOGICAL       , OP_GEN_LOGICAL       , //0B
@@ -6035,7 +6849,7 @@ const static U8 TypeOp1[256] = {
   OP_GEN_FLAG_CONTROL  , OP_GEN_FLAG_CONTROL  , OP_GEN_ARITH_BINARY  , OP_GEN_BRANCH        , //FF
 };
 
-const static U8 TypeOp2[256] = {
+static const U8 TypeOp2[256] = {
   OP_SYSTEM            , OP_SYSTEM            , OP_SYSTEM            , OP_SYSTEM            , //03
   OP_INVALID           , OP_SYSTEM            , OP_SYSTEM            , OP_SYSTEM            , //07
   OP_SYSTEM            , OP_SYSTEM            , OP_INVALID           , OP_GEN_CONTROL       , //0B
@@ -6102,7 +6916,7 @@ const static U8 TypeOp2[256] = {
   OP_MMX               , OP_MMX               , OP_MMX               , OP_INVALID           , //FF
 };
 
-const static U8 TypeOp3_38[256] = {
+static const U8 TypeOp3_38[256] = {
   OP_SSE               , OP_SSE               , OP_SSE               , OP_SSE               , //03
   OP_SSE               , OP_SSE               , OP_SSE               , OP_SSE               , //07
   OP_SSE               , OP_SSE               , OP_SSE               , OP_SSE               , //0B
@@ -6169,7 +6983,7 @@ const static U8 TypeOp3_38[256] = {
   OP_INVALID           , OP_INVALID           , OP_INVALID           , OP_INVALID           , //FF
 };
 
-const static U8 TypeOp3_3A[256] = {
+static const U8 TypeOp3_3A[256] = {
   OP_INVALID           , OP_INVALID           , OP_INVALID           , OP_INVALID           , //03
   OP_INVALID           , OP_INVALID           , OP_INVALID           , OP_INVALID           , //07
   OP_SSE               , OP_SSE               , OP_SSE               , OP_SSE               , //0B
@@ -6236,7 +7050,7 @@ const static U8 TypeOp3_3A[256] = {
   OP_INVALID           , OP_INVALID           , OP_INVALID           , OP_INVALID           , //FF
 };
 
-const static U8 TypeOpX[32] = {
+static const U8 TypeOpX[32] = {
   // escapes for F6
   OP_GEN_LOGICAL       , OP_GEN_LOGICAL       , OP_GEN_LOGICAL       , OP_GEN_ARITH_BINARY  ,
   OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  , OP_GEN_ARITH_BINARY  ,
@@ -6338,194 +7152,178 @@ struct Instruction {
 
 #define MinRequired          8 // minimum required consecutive valid instructions to be considered as code
 
-inline bool IsInvalidX64Op(U8 Op){
-  for (int i=0; i<19; i++){
-    if (Op == InvalidX64Ops[i])
-      return true;
-  }
-  return false;
-}
-
-inline bool IsValidX64Prefix(U8 Prefix){
-  for (int i=0; i<8; i++){
-    if (Prefix == X64Prefixes[i])
-      return true;
-  }
-  return ((Prefix>=0x40 && Prefix<=0x4F) || (Prefix>=0x64 && Prefix<=0x67));
-}
-
-void ProcessMode(Instruction &Op, ExeState &State){
-  if ((Op.Flags&fMODE)==fAM){
-    Op.Data|=AddressMode;
-    Op.BytesRead = 0;
-    switch (Op.Flags&fTYPE){
-      case fDR : Op.Data|=(2<<TypeShift);
-      case fDA : Op.Data|=(1<<TypeShift);
-      case fAD : {
-        State = Read32;
-        break;
-      }
-      case fBR : {
-        Op.Data|=(2<<TypeShift);
-        State = Read8;
-      }
-    }
-  }
-  else{
-    switch (Op.Flags&fTYPE){
-      case fBI : State = Read8; break;
-      case fWI : {
-        State = Read16;
-        Op.Data|=(1<<TypeShift);
-        Op.BytesRead = 0;
-        break;
-      }
-      case fDI : {
-        // x64 Move with 8byte immediate? [REX.W is set, opcodes 0xB8+r]
-        Op.imm8=((Op.REX & REX_w)>0 && (Op.Code&0xF8)==0xB8);
-        if (!Op.o16 || Op.imm8){
-          State = Read32;
-          Op.Data|=(2<<TypeShift);
-        }
-        else{
-          State = Read16;
-          Op.Data|=(3<<TypeShift);
-        }
-        Op.BytesRead = 0;
-        break;
-      }
-      default: State = Start; /*no immediate*/
-    }
-  }
-}
-
-void ProcessFlags2(Instruction &Op, ExeState &State){
-  //if arriving from state ExtraFlags, we've already read the ModRM byte
-  if ((Op.Flags&fMODE)==fMR && State!=ExtraFlags){
-    State = ReadModRM;
-    return;
-  }
-  ProcessMode(Op, State);
-}
-
-void ProcessFlags(Instruction &Op, ExeState &State){
-  if (Op.Code==OP_CALLF || Op.Code==OP_JMPF || Op.Code==OP_ENTER){
-    Op.BytesRead = 0;
-    State = Read16_f;
-    return; //must exit, ENTER has ModRM too
-  }
-  ProcessFlags2(Op, State);
-}
-
-void CheckFlags(Instruction &Op, ExeState &State){
-  //must peek at ModRM byte to read the REG part, so we can know the opcode
-  if (Op.Flags==fMEXTRA)
-    State = ExtraFlags;
-  else if (Op.Flags==fERR){
-    memset(&Op, 0, sizeof(Instruction));
-    State = Error;
-  }
-  else
-    ProcessFlags(Op, State);
-}
-
-void ReadFlags(Instruction &Op, ExeState &State){
-  Op.Flags = Table1[Op.Code];
-  Op.Category = TypeOp1[Op.Code];
-  CheckFlags(Op, State);
-}
-
-void ProcessModRM(Instruction &Op, ExeState &State){
-  if ((Op.ModRM & ModRM_mod)==0x40)
-    State = Read8_ModRM; //register+byte displacement
-  else if ((Op.ModRM & ModRM_mod)==0x80 || (Op.ModRM & (ModRM_mod|ModRM_rm))==0x05 || (Op.ModRM<0x40 && (Op.SIB & SIB_base)==0x05) ){
-    State = Read32_ModRM; //register+dword displacement
-    Op.BytesRead = 0;
-  }
-  else
-    ProcessMode(Op, State);
-}
-
-void ApplyCodeAndSetFlag(Instruction &Op, U32 Flag = 0){
-  Op.Data&=ClearCodeMask; \
-  Op.Data|=(Op.Code<<CodeShift)|Flag;
-}
-
-inline U32 OpN(OpCache &Cache, U32 n){
-  return Cache.Op[ (Cache.Index-n)&(CacheSize-1) ];
-}
-
-inline U32 OpNCateg(U32 &Mask, U32 n){
-  return ((Mask>>(CategoryShift*(n-1)))&CategoryMask);
-}
-
-inline int pref(int i) { return (buf(i)==0x0f)+2*(buf(i)==0x66)+3*(buf(i)==0x67); }
-
-// Get context at buf(i) relevant to parsing 32-bit x86 code
-U32 execxt(int i, int x=0) {
-  int prefix=0, opcode=0, modrm=0, sib=0;
-  if (i) prefix+=4*pref(i--);
-  if (i) prefix+=pref(i--);
-  if (i) opcode+=buf(i--);
-  if (i) modrm+=buf(i--)&(ModRM_mod|ModRM_rm);
-  if (i&&((modrm&ModRM_rm)==4)&&(modrm<ModRM_mod)) sib=buf(i)&SIB_scale;
-  return prefix|opcode<<4|modrm<<12|x<<20|sib<<(28-6);
-}
-
-class exeModel{
+class exeModel {
+private:
   static const int N1=8, N2=10;
-  ContextMap cm;
+  ContextMap2 cm;
   OpCache Cache;
   U32 StateBH[256];
   ExeState pState, State;
   Instruction Op;
   U32 TotalOps, OpMask, OpCategMask, Context, BrkPoint, BrkCtx;
   bool Valid;
+  inline bool IsInvalidX64Op(U8 Op) {
+    for (int i=0; i<19; i++) {
+      if (Op == InvalidX64Ops[i])
+        return true;
+    }
+    return false;
+  }
+  inline bool IsValidX64Prefix(U8 Prefix) {
+    for (int i=0; i<8; i++) {
+      if (Prefix == X64Prefixes[i])
+        return true;
+    }
+    return ((Prefix>=0x40 && Prefix<=0x4F) || (Prefix>=0x64 && Prefix<=0x67));
+  }
+  void ProcessMode(Instruction &Op, ExeState &State) {
+    if ((Op.Flags&fMODE)==fAM) {
+      Op.Data|=AddressMode;
+      Op.BytesRead = 0;
+      switch (Op.Flags&fTYPE) {
+        case fDR : Op.Data|=(2<<TypeShift);
+        case fDA : Op.Data|=(1<<TypeShift);
+        case fAD : {
+          State = Read32;
+          break;
+        }
+        case fBR : {
+          Op.Data|=(2<<TypeShift);
+          State = Read8;
+        }
+      }
+    }
+    else{
+      switch (Op.Flags&fTYPE) {
+        case fBI : State = Read8; break;
+        case fWI : {
+          State = Read16;
+          Op.Data|=(1<<TypeShift);
+          Op.BytesRead = 0;
+          break;
+        }
+        case fDI : {
+          // x64 Move with 8byte immediate? [REX.W is set, opcodes 0xB8+r]
+          Op.imm8=((Op.REX & REX_w)>0 && (Op.Code&0xF8)==0xB8);
+          if (!Op.o16 || Op.imm8){
+            State = Read32;
+            Op.Data|=(2<<TypeShift);
+          }
+          else{
+            State = Read16;
+            Op.Data|=(3<<TypeShift);
+          }
+          Op.BytesRead = 0;
+          break;
+        }
+        default: State = Start; /*no immediate*/
+      }
+    }
+  }
+  void ProcessFlags2(Instruction &Op, ExeState &State) {
+    //if arriving from state ExtraFlags, we've already read the ModRM byte
+    if ((Op.Flags&fMODE)==fMR && State!=ExtraFlags) {
+      State = ReadModRM;
+      return;
+    }
+    ProcessMode(Op, State);
+  }
+  void ProcessFlags(Instruction &Op, ExeState &State) {
+    if (Op.Code==OP_CALLF || Op.Code==OP_JMPF || Op.Code==OP_ENTER) {
+      Op.BytesRead = 0;
+      State = Read16_f;
+      return; //must exit, ENTER has ModRM too
+    }
+    ProcessFlags2(Op, State);
+  }
+  void CheckFlags(Instruction &Op, ExeState &State) {
+    //must peek at ModRM byte to read the REG part, so we can know the opcode
+    if (Op.Flags==fMEXTRA)
+      State = ExtraFlags;
+    else if (Op.Flags==fERR) {
+      memset(&Op, 0, sizeof(Instruction));
+      State = Error;
+    }
+    else
+      ProcessFlags(Op, State);
+  }
+  void ReadFlags(Instruction &Op, ExeState &State) {
+    Op.Flags = Table1[Op.Code];
+    Op.Category = TypeOp1[Op.Code];
+    CheckFlags(Op, State);
+  }
+  void ProcessModRM(Instruction &Op, ExeState &State) {
+    if ((Op.ModRM & ModRM_mod)==0x40)
+      State = Read8_ModRM; //register+byte displacement
+    else if ((Op.ModRM & ModRM_mod)==0x80 || (Op.ModRM & (ModRM_mod|ModRM_rm))==0x05 || (Op.ModRM<0x40 && (Op.SIB & SIB_base)==0x05) ){
+      State = Read32_ModRM; //register+dword displacement
+      Op.BytesRead = 0;
+    }
+    else
+      ProcessMode(Op, State);
+  }
+  void ApplyCodeAndSetFlag(Instruction &Op, U32 Flag = 0) {
+    Op.Data&=ClearCodeMask; \
+      Op.Data|=(Op.Code<<CodeShift)|Flag;
+  }
+  inline U32 OpN(OpCache &Cache, U32 n) {
+    return Cache.Op[ (Cache.Index-n)&(CacheSize-1) ];
+  }
+  inline U32 OpNCateg(U32 &Mask, U32 n) {
+    return ((Mask>>(CategoryShift*(n-1)))&CategoryMask);
+  }
+  inline int pref(int i) { return (buf(i)==0x0f)+2*(buf(i)==0x66)+3*(buf(i)==0x67); }
+  // Get context at buf(i) relevant to parsing 32-bit x86 code
+  U32 execxt(int i, int x=0) {
+    int prefix=0, opcode=0, modrm=0, sib=0;
+    if (i) prefix+=4*pref(i--);
+    if (i) prefix+=pref(i--);
+    if (i) opcode+=buf(i--);
+    if (i) modrm+=buf(i--)&(ModRM_mod|ModRM_rm);
+    if (i&&((modrm&ModRM_rm)==4)&&(modrm<ModRM_mod)) sib=buf(i)&SIB_scale;
+    return prefix|opcode<<4|modrm<<12|x<<20|sib<<(28-6);
+  }
   void Update(U8 B, bool Forced = false);
   void Train();
 public:
-  exeModel() : cm(MEM*2, N1+N2), pState (Start), State( Start), TotalOps(0), OpMask(0), OpCategMask(0), Context(0), BrkPoint(0), BrkCtx(0), Valid(false){
+  exeModel() : cm(MEM*2, N1+N2), pState (Start), State( Start), TotalOps(0), OpMask(0), OpCategMask(0), Context(0), BrkPoint(0), BrkCtx(0), Valid(false) {
     memset(&Cache, 0, sizeof(OpCache));
     memset(&Op, 0, sizeof(Instruction));
     memset(&StateBH, 0, sizeof(StateBH));
     if (trainEXE) Train();
   }
-  bool Predict(Mixer& m, bool Forced = false, ModelStats *Stats = NULL);
+  bool Predict(Mixer& m, bool Forced = false, ModelStats *Stats = nullptr);
 };
 
-void exeModel::Train(){
+void exeModel::Train() {
   FileDisk f;
-  int i;
-  char filename[MAX_PATH+1];
-  if ((i=GetModuleFileName(NULL, filename,MAX_PATH)) && i<=MAX_PATH){
-    f.open(filename,true);
-    printf("Pre-training x86/x64 model...");
-    i=0;
-    do{
-      Update(buf(1));
-      if (Valid)
-        cm.Train(i);
-      buf[pos++]=i;
-      blpos++;
-    } while ((i=f.getc())!=EOF);
-    printf(" done [%d bytes]\n",pos-1);
-    f.close();
-    pos=blpos=0;
-    memset(&buf[0], 0, buf.size());
-  }
+  printf("Pre-training x86/x64 model...");
+  OpenFromMyFolder::myself(&f);
+  int i=0;
+  do {
+    Update(buf(1));
+    if (Valid)
+      cm.Train(i);
+    buf[pos++]=i;
+    blpos++;
+  } while ((i=f.getchar())!=EOF);
+  printf(" done [%d bytes]\n",pos-1);
+  f.close();
+  pos=blpos=0;
+  memset(&buf[0], 0, buf.size());
 }
 
-void exeModel::Update(U8 B, bool Forced){
+void exeModel::Update(U8 B, bool Forced) {
   pState = State;
   Op.Size++;
-  switch (State){
+  switch (State) {
     case Start: case Error: {
       // previous code may have just been a REX prefix
       bool Skip = false;
-      if (Op.MustCheckREX){
+      if (Op.MustCheckREX) {
         Op.MustCheckREX = false;
         // valid x64 code?
-        if (!IsInvalidX64Op(B) && !IsValidX64Prefix(B)){
+        if (!IsInvalidX64Op(B) && !IsValidX64Prefix(B)) {
           Op.REX = Op.Code;
           Op.Code = B;
           Op.Data = PrefixREX|(Op.Code<<CodeShift)|(Op.Data&PrefixMask);
@@ -6534,7 +7332,7 @@ void exeModel::Update(U8 B, bool Forced){
       }
 
       Op.ModRM = Op.SIB = Op.REX = Op.Flags = Op.BytesRead = 0;
-      if (!Skip){
+      if (!Skip) {
         Op.Code = B;
         // possible REX prefix?
         Op.MustCheckREX = ((Op.Code&0xF0)==0x40) && (!(Op.Decoding && ((Op.Data&PrefixMask)==1)));
@@ -6548,7 +7346,7 @@ void exeModel::Update(U8 B, bool Forced){
                     (Op.Code==LOCK)*6 +
                     (Op.Code==REP_N_STR || Op.Code==REP_STR)*7;
 
-        if (!Op.Decoding){
+        if (!Op.Decoding) {
           TotalOps+=(Op.Data!=0)-(Cache.Index && Cache.Op[ Cache.Index&(CacheSize-1) ]!=0);
           OpMask = (OpMask<<1)|(State!=Error);
           OpCategMask = (OpCategMask<<CategoryShift)|(Op.Category);
@@ -6559,7 +7357,7 @@ void exeModel::Update(U8 B, bool Forced){
 
           if (!Op.Prefix)
             Op.Data = Op.Code<<CodeShift;
-          else{
+          else {
             Op.Data = Op.Prefix;
             Op.Category = TypeOp1[Op.Code];
             Op.Decoding = true;
@@ -6567,14 +7365,14 @@ void exeModel::Update(U8 B, bool Forced){
             break;
           }
         }
-        else{
+        else {
           // we only have enough bits for one prefix, so the
           // instruction will be encoded with the last one
-          if (!Op.Prefix){
+          if (!Op.Prefix) {
             Op.Data|=(Op.Code<<CodeShift);
             Op.Decoding = false;
           }
-          else{
+          else {
             Op.Data = Op.Prefix;
             Op.Category = TypeOp1[Op.Code];
             BrkCtx = hash(1+(BrkPoint = 1), Op.Prefix, OpCategMask&CategoryMask);
@@ -6607,7 +7405,7 @@ void exeModel::Update(U8 B, bool Forced){
         State = Read_OP3_38;
       else if (Op.Code==0x3A)
         State = Read_OP3_3A;
-      else{
+      else {
         ApplyCodeAndSetFlag(Op);
         Op.Flags = Table2[Op.Code];
         Op.Category = TypeOp2[Op.Code];
@@ -6625,12 +7423,12 @@ void exeModel::Update(U8 B, bool Forced){
       Op.ModRM = B;
       Op.Data|=(Op.ModRM<<ModRMShift)|HasModRM;
       Op.SIB = 0;
-      if (Op.Flags==fMEXTRA){
+      if (Op.Flags==fMEXTRA) {
         Op.Data|=HasExtraFlags;
         int i = ((Op.ModRM>>3)&0x07) | ((Op.Code&0x01)<<3) | ((Op.Code&0x08)<<1);
         Op.Flags = TableX[i];
         Op.Category = TypeOpX[i];
-        if (Op.Flags==fERR){
+        if (Op.Flags==fERR) {
           memset(&Op, 0, sizeof(Instruction));
           State = Error;
           BrkCtx = hash(1+(BrkPoint = 6), State);
@@ -6641,7 +7439,7 @@ void exeModel::Update(U8 B, bool Forced){
         break;
       }
 
-      if ((Op.ModRM & ModRM_rm)==4 && Op.ModRM<ModRM_mod){
+      if ((Op.ModRM & ModRM_rm)==4 && Op.ModRM<ModRM_mod) {
         State = ReadSIB;
         BrkCtx = hash(1+(BrkPoint = 8), State);
         break;
@@ -6654,11 +7452,11 @@ void exeModel::Update(U8 B, bool Forced){
     case Read_OP3_38 : case Read_OP3_3A : {
       Op.Code = B;
       ApplyCodeAndSetFlag(Op, Prefix38<<(State-Read_OP3_38));
-      if (State==Read_OP3_38){
+      if (State==Read_OP3_38) {
         Op.Flags = Table3_38[Op.Code];
         Op.Category = TypeOp3_38[Op.Code];
       }
-      else{
+      else {
         Op.Flags = Table3_3A[Op.Code];
         Op.Category = TypeOp3_3A[Op.Code];
       }
@@ -6674,7 +7472,7 @@ void exeModel::Update(U8 B, bool Forced){
       break;
     }
     case Read8 : case Read16 : case Read32 : {
-      if (++Op.BytesRead>=((State-Read8)<<int(Op.imm8+1))){
+      if (++Op.BytesRead>=((State-Read8)<<int(Op.imm8+1))) {
         Op.BytesRead = 0;
         Op.imm8 = false;
         State = Start;
@@ -6688,7 +7486,7 @@ void exeModel::Update(U8 B, bool Forced){
       break;
     }
     case Read16_f : {
-      if (++Op.BytesRead==2){
+      if (++Op.BytesRead==2) {
         Op.BytesRead = 0;
         ProcessFlags2(Op, State);
       }
@@ -6697,7 +7495,7 @@ void exeModel::Update(U8 B, bool Forced){
     }
     case Read32_ModRM : {
       Op.Data|=RegDWordDisplacement;
-      if (++Op.BytesRead==4){
+      if (++Op.BytesRead==4) {
         Op.BytesRead = 0;
         ProcessMode(Op, State);
       }
@@ -6709,7 +7507,7 @@ void exeModel::Update(U8 B, bool Forced){
   Context = State+16*Op.BytesRead+16*(Op.REX & REX_w);
   StateBH[Context] = (StateBH[Context]<<8)|B;
 
-  if (Valid || Forced){
+  if (Valid || Forced) {
     int mask=0, count0=0;
     for (int i=0, j=0; i<N1; ++i){
       if (i>1) mask=mask*2+(buf(i-1)==0), count0+=mask&1;
@@ -6753,14 +7551,14 @@ void exeModel::Update(U8 B, bool Forced){
   }
 }
 
-bool exeModel::Predict(Mixer& m, bool Forced, ModelStats *Stats){
+bool exeModel::Predict(Mixer& m, bool Forced, ModelStats *Stats) {
   if (bpos==0)
     Update(buf(1), Forced);
 
   if (Valid || Forced)
     cm.mix(m);
-  else{
-      for (int i=0; i<N1+N2; ++i)
+  else {
+      for (int i=0; i<(N1+N2)*8; ++i)
         m.add(0);
   }
   U8 s = ((StateBH[Context]>>(28-bpos))&0x08) |
@@ -7100,9 +7898,9 @@ void XMLModel(Mixer& m, ModelStats *Stats = NULL){
     XMLContent *Content = &(*Tag).Content;
     pState = State;
     c8 = (c8<<8)|buf(5);
-    if ((B==0x09 || B==0x20) && (B==(U8)(c4>>8) || !WhiteSpaceRun)){
+    if ((B==TAB || B==SPACE) && (B==(U8)(c4>>8) || !WhiteSpaceRun)){
       WhiteSpaceRun++;
-      IndentTab = (B==0x09);
+      IndentTab = (B==TAB);
     }
     else{
       if ((State==None || (State==ReadContent && (*Content).Length<=LineEnding+WhiteSpaceRun)) && WhiteSpaceRun>1+IndentTab && WhiteSpaceRun!=pWSRun){
@@ -7111,8 +7909,8 @@ void XMLModel(Mixer& m, ModelStats *Stats = NULL){
       }
       WhiteSpaceRun=0;
     }
-    if (B==0x0A)
-      LineEnding = 1+((U8)(c4>>8)==0x0D);
+    if (B==NEW_LINE)
+      LineEnding = 1+((U8)(c4>>8)==CARRIAGE_RETURN);
 
     switch (State){
       case None : {
@@ -7128,7 +7926,7 @@ void XMLModel(Mixer& m, ModelStats *Stats = NULL){
         break;
       }
       case ReadTagName : {
-        if ((*Tag).Length>0 && (B==0x09 || B==0x0A || B==0x0D || B==0x20))
+        if ((*Tag).Length>0 && (B==TAB || B==NEW_LINE || B==CARRIAGE_RETURN || B==SPACE))
           State = ReadTag;
         else if ((B==0x3A || (B>='A' && B<='Z') || B==0x5F || (B>='a' && B<='z')) || ((*Tag).Length>0 && (B==0x2D || B==0x2E || (B>='0' && B<='9')))){
           (*Tag).Length++;
@@ -7187,7 +7985,7 @@ void XMLModel(Mixer& m, ModelStats *Stats = NULL){
           else
             State = ReadContent;
         }
-        else if (B!=0x09 && B!=0x0A && B!=0x0D && B!=0x20){
+        else if (B!=TAB && B!=NEW_LINE && B!=CARRIAGE_RETURN && B!=SPACE){
           State = ReadAttributeName;
           (*Attribute).Name = B&0xDF;
         }
@@ -7276,50 +8074,53 @@ void XMLModel(Mixer& m, ModelStats *Stats = NULL){
 
 class ContextModel{
   ContextMap2 cm;
-  exeModel exeModel1;
   RunContextMap rcm7, rcm9, rcm10;
+  exeModel exeModel1;
+  TextModel textModel;
   Mixer m;
   U32 cxt[16];
   Filetype ft2, filetype;
   int blocksize, blockinfo;
   void UpdateContexts(U8 B);
-  void Train();
+  void Train(const char* Dictionary, int Iterations = 1);
 public:
-  ContextModel() : cm(MEM*32, 9), rcm7(MEM), rcm9(MEM), rcm10(MEM), m(1016, 4096+(1024+512+1024*3)*(level>=4), 7+5*(level>=4)), ft2(DEFAULT), filetype(DEFAULT), blocksize(0), blockinfo(0){
+  ContextModel() : cm(MEM*32, 9), rcm7(MEM), rcm9(MEM), rcm10(MEM), textModel(MEM*16), 
+  #ifdef USE_WORD_MODEL
+    m(896+288, 4096+(1024+512+1024*3+4096)*(level>=4), 7+8*(level>=4)),
+  #else     
+    m(896, 4096+(1024+512+1024*3+4096)*(level>=4), 7+8*(level>=4)),
+  #endif
+    ft2(DEFAULT), filetype(DEFAULT), blocksize(0), blockinfo(0){
     memset(&cxt[0], 0, sizeof(cxt));
-    if (trainTXT) Train();
+    if (trainTXT) {
+      Train("english.dic", 3);
+      Train("english.exp");
+    }
   }
   int Predict(ModelStats *Stats = NULL);
 };
 
-void ContextModel::Train(){
+void ContextModel::Train(const char* Dictionary, int Iterations){
   FileDisk f;
+  printf("Pre-training main model...");
+  OpenFromMyFolder::anotherfile(&f, Dictionary);
   int i;
-  char filename[MAX_PATH+12];
-  if ((i=GetModuleFileName(NULL, filename,MAX_PATH)) && i<=MAX_PATH){
-    char *p=strrchr(filename, '\\');
-    if (p!=0){
-      p++;
-      strcpy(p,"english.dic");
-
-      if ((f.open(filename,true))){
-        printf("Pre-training main model...");
-        i=0;
-        do{
-          if (!i || i==10 || i==13)
-            i = SPACE;
-          UpdateContexts(buf(1));
-          cm.Train(i);
-          buf[pos++]=i;
-        } while ((i=f.getc())!=EOF);
-        printf(" done [%d bytes]\n",pos);
-        f.close();
-        pos=0;
-        memset(&cxt[0], 0, sizeof(cxt));
-        memset(&buf[0], 0, buf.size());
-      }
-    }
+  while (Iterations-->0) {
+    f.setpos(0);
+    i=pos=0;
+    do {
+      if (!i||i==10||i==13)
+        i = SPACE;
+      UpdateContexts(buf(1));
+      cm.Train(i);
+      buf[pos++]=i;
+    } while ((i=f.getchar())!=EOF);
   }
+  printf(" done [%s, %d bytes]\n", Dictionary, pos);
+  f.close();
+  pos=0;
+  memset(&cxt[0], 0, sizeof(cxt));
+  memset(&buf[0], 0, buf.size());
 }
 
 void ContextModel::UpdateContexts(U8 B){
@@ -7329,6 +8130,9 @@ void ContextModel::UpdateContexts(U8 B){
     cm.set(cxt[i]);
   cm.set(cxt[8]);
   cm.set(cxt[14]);
+  rcm7.set(cxt[7]);
+  rcm9.set(cxt[10]);
+  rcm10.set(cxt[12]);
 }
 
 int ContextModel::Predict(ModelStats *Stats){
@@ -7370,12 +8174,8 @@ int ContextModel::Predict(ModelStats *Stats){
   if ((filetype==JPEG || filetype==HDR)) if (jpegModel(m)) return m.p();
 
   // Normal model
-  if (bpos==0) {
+  if (bpos==0)
     UpdateContexts(buf(1));
-    rcm7.set(cxt[7]);
-    rcm9.set(cxt[10]);
-    rcm10.set(cxt[12]);
-  }
   int order=cm.mix(m);
 
   rcm7.mix(m);
@@ -7386,11 +8186,14 @@ int ContextModel::Predict(ModelStats *Stats){
     sparseModel(m,matchlength,order);
     distanceModel(m);
     recordModel(m, filetype, Stats);
+  #ifdef USE_WORD_MODEL
     wordModel(m, filetype);
+  #endif
     indirectModel(m);
     dmcModel(m);
     nestModel(m);
     XMLModel(m, Stats);
+    textModel.Predict(m, buf, Stats);
     exeModel1.Predict(m, filetype==EXE, Stats);
   }
 
@@ -7517,10 +8320,10 @@ private:
     y ? (x2=xmid) : (x1=xmid+1);
     predictor.update();
     while (((x1^x2)&0xff000000)==0) {  // pass equal leading bytes of range
-      if (mode==COMPRESS) archive->putc(x2>>24);
+      if (mode==COMPRESS) archive->putchar(x2>>24);
       x1<<=8;
       x2=(x2<<8)+255;
-      if (mode==DECOMPRESS) x=(x<<8)+(archive->getc()&255);  // EOF is OK
+      if (mode==DECOMPRESS) x=(x<<8)+(archive->getchar()&255);  // EOF is OK
     }
     return y;
   }
@@ -7536,7 +8339,7 @@ public:
   void compress(int c) {
     assert(mode==COMPRESS);
     if (level==0)
-      archive->putc(c);
+      archive->putchar(c);
     else
       for (int i=7; i>=0; --i)
         code((c>>i)&1);
@@ -7546,10 +8349,10 @@ public:
   int decompress() {
     if (mode==COMPRESS) {
       assert(alt);
-      return alt->getc();
+      return alt->getchar();
     }
     else if (level==0)
-      return archive->getc();
+      return archive->getchar();
     else {
       int c=0;
       for (int i=0; i<8; ++i)
@@ -7579,7 +8382,7 @@ Encoder::Encoder(Mode m, File *f):
   }
   if (level>0 && mode==DECOMPRESS) {  // x = first 4 bytes of archive
     for (int i=0; i<4; ++i)
-      x=(x<<8)+(archive->getc()&255);
+      x=(x<<8)+(archive->getchar()&255);
   }
   for (int i=0; i<1024; ++i)
     dt[i]=16384/(i+i+3);
@@ -7588,7 +8391,7 @@ Encoder::Encoder(Mode m, File *f):
 
 void Encoder::flush() {
   if (mode==COMPRESS && level>0)
-    archive->putc(x1>>24);  // Flush first unequal byte of range
+    archive->putchar(x1>>24);  // Flush first unequal byte of range
 }
 
 /////////////////////////// Filters /////////////////////////////////
@@ -7773,7 +8576,7 @@ bool IsGrayscalePalette(File *in, int n = 256, int isRGBA = 0){
   U64 offset = in->curpos();
   int stride = 3+isRGBA, res = (n>0)<<8, order=1;
   for (int i = 0; (i < n*stride) && (res>>8); i++) {
-    int b = in->getc();
+    int b = in->getchar();
     if (b==EOF){
       res = 0;
       break;
@@ -7825,7 +8628,7 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
   char pgm_buf[32];
   int cdi=0,cda=0,cdm=0;  // For CD sectors detection
   U32 cdf=0;
-  unsigned char zbuf[256+32], zin[1<<16], zout[1<<16]; // For ZLIB stream detection
+  unsigned char zbuf[256+32] = {0}, zin[1<<16] = {0}, zout[1<<16] = {0}; // For ZLIB stream detection
   int zbufpos=0,zzippos=-1, histogram[256]={0};
   int pdfim=0,pdfimw=0,pdfimh=0,pdfimb=0,pdfgray=0,pdfimp=0;
   int b64s=0,b64i=0,b64line=0,b64nl=0; // For base64 detection
@@ -7839,7 +8642,7 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
   else if (detd) {in->setpos(start+detd);detd=0;return DEFAULT;}
 
   for (int i=0; i<n; ++i) {
-    int c=in->getc();
+    int c=in->getchar();
     if (c==EOF) return (Filetype)(-1);
     buf3=buf3<<8|buf2>>24;
     buf2=buf2<<8|buf1>>24;
@@ -8087,13 +8890,13 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
       int numpat=1; // number of patterns
       for (int j=0; j<31; j++) {
         in->setpos(start+i-1083+42+j*30);
-        const int i1=in->getc();
-        const int i2=in->getc();
+        const int i1=in->getchar();
+        const int i2=in->getchar();
         len+=i1*512+i2*2;
       }
       in->setpos(start+i-131);
       for (int j=0; j<128; j++) {
-        int x=in->getc();
+        int x=in->getchar();
         if (x+1>numpat) numpat=x+1;
       }
       if (numpat<65) AUD_DET(AUDIO,i-1083,1084+numpat*256*chn,len,4);
@@ -8111,12 +8914,12 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
         int b[31],sam_start=(1<<16),sam_end=0,ok=1;
         for (int j=0;j<s3mni;j++) {
           in->setpos(start+s3mi-31+0x60+s3mno+j*2);
-          int i1=in->getc();
-          i1+=in->getc()*256;
+          int i1=in->getchar();
+          i1+=in->getchar()*256;
           in->setpos(start+s3mi-31+i1*16);
-          i1=in->getc();
+          i1=in->getchar();
           if (i1==1) { // type: sample
-            for (int k=0;k<31;k++) b[k]=in->getc();
+            for (int k=0;k<31;k++) b[k]=in->getchar();
             int len=b[15]+(b[16]<<8);
             int ofs=b[13]+(b[14]<<8);
             if (b[30]>1) ok=0;
@@ -8241,11 +9044,11 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
       in->setpos(start+i+ (U64)bswap(buf0)-7);
 
       // read directory
-      int dirsize=in->getc();
+      int dirsize=in->getchar();
       int tifx=0,tify=0,tifz=0,tifzb=0,tifc=0,tifofs=0,tifofval=0,b[12];
-      if (in->getc()==0) {
+      if (in->getchar()==0) {
         for (int i=0; i<dirsize; i++) {
-          for (int j=0; j<12; j++) b[j]=in->getc();
+          for (int j=0; j<12; j++) b[j]=in->getchar();
           if (b[11]==EOF) break;
           int tag=b[0]+(b[1]<<8);
           int tagfmt=b[2]+(b[3]<<8);
@@ -8264,7 +9067,7 @@ Filetype detect(File *in, U64 blocksize, Filetype type, int &info) {
       if (tifx && tify && tifzb && (tifz==1 || tifz==3) && (tifc==1) && (tifofs && tifofs+i<n)) {
         if (!tifofval) {
           in->setpos(start+i+tifofs-7);
-          for (int j=0; j<4; j++) b[j]=in->getc();
+          for (int j=0; j<4; j++) b[j]=in->getchar();
           tifofs=b[0]+(b[1]<<8)+(b[2]<<16)+(b[3]<<24);
         }
         if (tifofs && tifofs<(1<<18) && tifofs+i<n) {
@@ -8388,8 +9191,8 @@ void encode_cd(File *in, File *out, U64 size, int info) {
   U8 blk[BLOCK];
   U64 blockresidual=size%BLOCK;
   assert(blockresidual<65536);
-  out->putc((blockresidual>>8)&255);
-  out->putc(blockresidual &255);
+  out->putchar((blockresidual>>8)&255);
+  out->putchar(blockresidual &255);
   for (U64 offset=0; offset<size; offset+=BLOCK) {
     if (offset+BLOCK > size) { //residual
       in->blockread(&blk[0], size-offset);
@@ -8412,13 +9215,13 @@ U64 decode_cd(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
   U64 nextblockpos=0;
   int address=-1;
   int datasize=0;
-  U64 residual=(in->getc() << 8) + in->getc();
+  U64 residual=(in->getchar() << 8) + in->getchar();
   size -=2;
   while (i<size) {
     if (size-i == residual) { //residual data after last sector
       in->blockread(blk, residual);
       if (mode==FDECOMPRESS) out->blockwrite(blk, residual);
-      else if (mode==FCOMPARE) for (int j=0; j<residual; ++j) if (blk[j]!= out->getc() && !diffFound) diffFound=nextblockpos+j+1;
+      else if (mode==FCOMPARE) for (int j=0; j<residual; ++j) if (blk[j]!= out->getchar() && !diffFound) diffFound=nextblockpos+j+1;
       return nextblockpos+residual;
     } else if (i==0) { //first sector
       in->blockread(blk+12, 4); //header (4 bytes) consisting of address (Minutes, Seconds, Sectors) and mode (1 = Mode1, 2 = Mode2/Form1, 3 = Mode2/Form2)
@@ -8437,7 +9240,7 @@ U64 decode_cd(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
     }
     expand_cd_sector(blk, address, 0);
     if (mode==FDECOMPRESS) out->blockwrite(blk, BLOCK);
-    else if (mode==FCOMPARE) for (int j=0; j<BLOCK; ++j) if (blk[j]!= out->getc() && !diffFound) diffFound=nextblockpos+j+1;
+    else if (mode==FCOMPARE) for (int j=0; j<BLOCK; ++j) if (blk[j]!= out->getchar() && !diffFound) diffFound=nextblockpos+j+1;
     nextblockpos+=BLOCK;
   }
   return nextblockpos;
@@ -8451,14 +9254,14 @@ void encode_bmp(File *in, File *out, U64 len, int width) {
   int r,g,b;
   for (int i=0; i<(int)(len/width); i++) {
     for (int j=0; j<width/3; j++) {
-      b=in->getc();
-      g=in->getc();
-      r=in->getc();
-      out->putc(g);
-      out->putc(skipRGB?r:g-r);
-      out->putc(skipRGB?b:g-b);
+      b=in->getchar();
+      g=in->getchar();
+      r=in->getchar();
+      out->putchar(g);
+      out->putchar(skipRGB?r:g-r);
+      out->putchar(skipRGB?b:g-b);
     }
-    for (int j=0; j<width%3; j++) out->putc(in->getc());
+    for (int j=0; j<width%3; j++) out->putchar(in->getchar());
   }
 }
 
@@ -8471,24 +9274,24 @@ U64 decode_bmp(Encoder& en, U64 size, int width, File *out, FMode mode, U64 &dif
       g=en.decompress();
       r=en.decompress();
       if (mode==FDECOMPRESS) {
-        out->putc(skipRGB?r:b-r);
-        out->putc(b);
-        out->putc(skipRGB?g:b-g);
+        out->putchar(skipRGB?r:b-r);
+        out->putchar(b);
+        out->putchar(skipRGB?g:b-g);
         if (!j && !(i&0xf)) en.print_status();
       }
       else if (mode==FCOMPARE) {
-        if (((skipRGB?r:b-r)&255)!=out->getc() && !diffFound) diffFound=p+1;
-        if (b!= out->getc() && !diffFound) diffFound=p+2;
-        if (((skipRGB?g:b-g)&255)!= out->getc() && !diffFound) diffFound=p+3;
+        if (((skipRGB?r:b-r)&255)!=out->getchar() && !diffFound) diffFound=p+1;
+        if (b!= out->getchar() && !diffFound) diffFound=p+2;
+        if (((skipRGB?g:b-g)&255)!= out->getchar() && !diffFound) diffFound=p+3;
         p+=3;
       }
     }
     for (int j=0; j<width%3; j++) {
       if (mode==FDECOMPRESS) {
-        out->putc(en.decompress());
+        out->putchar(en.decompress());
       }
       else if (mode==FCOMPARE) {
-        if (en.decompress()!= out->getc() && !diffFound) diffFound=p+j+1;
+        if (en.decompress()!= out->getchar() && !diffFound) diffFound=p+j+1;
       }
     }
   }
@@ -8500,16 +9303,16 @@ void encode_im32(File *in, File *out, U64 len, int width) {
   int r,g,b,a;
   for (int i=0; i<(int)(len/width); i++) {
     for (int j=0; j<width/4; j++) {
-      b=in->getc();
-      g=in->getc();
-      r=in->getc();
-      a=in->getc();
-      out->putc(g);
-      out->putc(skipRGB?r:g-r);
-      out->putc(skipRGB?b:g-b);
-      out->putc(a);
+      b=in->getchar();
+      g=in->getchar();
+      r=in->getchar();
+      a=in->getchar();
+      out->putchar(g);
+      out->putchar(skipRGB?r:g-r);
+      out->putchar(skipRGB?b:g-b);
+      out->putchar(a);
     }
-    for (int j=0; j<width%4; j++) out->putc(in->getc());
+    for (int j=0; j<width%4; j++) out->putchar(in->getchar());
   }
 }
 
@@ -8522,23 +9325,23 @@ U64 decode_im32(Encoder& en, U64 size, int width, File *out, FMode mode, U64 &di
     for (int j=0; j<width/4; j++) {
       b=en.decompress(), g=en.decompress(), r=en.decompress(), a=en.decompress();
       if (mode==FDECOMPRESS) {
-        out->putc(skipRGB?r:b-r); out->putc(b); out->putc(skipRGB?g:b-g); out->putc(a);
+        out->putchar(skipRGB?r:b-r); out->putchar(b); out->putchar(skipRGB?g:b-g); out->putchar(a);
         if (!j && !(i&0xf)) en.print_status();
       }
       else if (mode==FCOMPARE) {
-        if (((skipRGB?r:b-r)&255)!=out->getc() && !diffFound) diffFound=p+1;
-        if (b!=out->getc() && !diffFound) diffFound=p+2;
-        if (((skipRGB?g:b-g)&255)!=out->getc() && !diffFound) diffFound=p+3;
-        if (((a)&255)!=out->getc() && !diffFound) diffFound=p+4;
+        if (((skipRGB?r:b-r)&255)!=out->getchar() && !diffFound) diffFound=p+1;
+        if (b!=out->getchar() && !diffFound) diffFound=p+2;
+        if (((skipRGB?g:b-g)&255)!=out->getchar() && !diffFound) diffFound=p+3;
+        if (((a)&255)!=out->getchar() && !diffFound) diffFound=p+4;
         p+=4;
       }
     }
     for (int j=0; j<width%4; j++) {
       if (mode==FDECOMPRESS) {
-        out->putc(en.decompress());
+        out->putchar(en.decompress());
       }
       else if (mode==FCOMPARE) {
-        if (en.decompress()!=out->getc() && !diffFound) diffFound=p+j+1;
+        if (en.decompress()!=out->getchar() && !diffFound) diffFound=p+j+1;
       }
     }
   }
@@ -8606,8 +9409,8 @@ U64 decode_exe(Encoder& en, U64 size, File *out, FMode mode, U64 &diffFound) {
       c[1]=a>>16;
       c[0]=a>>24;
     }
-    if (mode==FDECOMPRESS) out->putc(c[5]);
-    else if (mode==FCOMPARE && c[5]!=out->getc() && !diffFound) diffFound=offset-6+1;
+    if (mode==FDECOMPRESS) out->putchar(c[5]);
+    else if (mode==FCOMPARE && c[5]!=out->getchar() && !diffFound) diffFound=offset-6+1;
     if (mode==FDECOMPRESS && !(offset&0xfff)) en.print_status();
     offset++;
   }
@@ -8655,7 +9458,7 @@ int encode_zlib(File *in, File *out, U64 len, int &hdrsize) {
 
   // Step 1 - parse offset type form zlib stream header
   U64 pos=in->curpos();
-  U32 h1=in->getc(), h2=in->getc();
+  U32 h1=in->getchar(), h2=in->getchar();
   in->setpos(pos);
   int zh=parse_zlib_header(h1*256+h2);
   int memlevel,clevel,window=zh==-1?0:MAX_WBITS+10+zh/4,ctype=zh%4;
@@ -8755,15 +9558,15 @@ int encode_zlib(File *in, File *out, U64 len, int &hdrsize) {
   MTF.MoveToFront(index);
 
   // Step 3 - write parameters, differences and precompressed (inflated) data
-  out->putc(diffCount[index]);
-  out->putc(window);
-  out->putc(index);
+  out->putchar(diffCount[index]);
+  out->putchar(window);
+  out->putchar(index);
   for (int i=0; i<=diffCount[index]; i++) {
     const int v=i==diffCount[index] ? int(len-diffPos[index*LIMIT+i])
                                     : int(diffPos[index*LIMIT+i+1]-diffPos[index*LIMIT+i])-1;
     out->put32(v);
   }
-  for (int i=0; i<diffCount[index]; i++) out->putc(diffByte[index*LIMIT+i+1]);
+  for (int i=0; i<diffCount[index]; i++) out->putchar(diffByte[index*LIMIT+i+1]);
 
   in->setpos(pos);
   main_strm.zalloc=Z_NULL; main_strm.zfree=Z_NULL; main_strm.opaque=Z_NULL;
@@ -8787,9 +9590,9 @@ int encode_zlib(File *in, File *out, U64 len, int &hdrsize) {
 int decode_zlib(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
   const int BLOCK=1<<16, LIMIT=128;
   U8 zin[BLOCK],zout[BLOCK];
-  int diffCount=min(in->getc(),LIMIT-1);
-  int window=in->getc()-MAX_WBITS;
-  int index=in->getc();
+  int diffCount=min(in->getchar(),LIMIT-1);
+  int window=in->getchar()-MAX_WBITS;
+  int index=in->getchar();
   int memlevel=(index%9)+1;
   int clevel=(index/9)+1;
   int len=0;
@@ -8801,7 +9604,7 @@ int decode_zlib(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
   }
   U8 diffByte[LIMIT];
   diffByte[0]=0;
-  for (int i=0; i<diffCount; i++) diffByte[i+1]=in->getc();
+  for (int i=0; i<diffCount; i++) diffByte[i+1]=in->getchar();
   size-=7+5*diffCount;
 
   z_stream rec_strm;
@@ -8824,14 +9627,14 @@ int decode_zlib(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
         diffIndex++;
       }
       if (mode==FDECOMPRESS) out->blockwrite(&zout[0], have);
-      else if (mode==FCOMPARE) for (int j=0; j<have; j++) if (zout[j]!=out->getc() && !diffFound) diffFound=recpos+j+1;
+      else if (mode==FCOMPARE) for (int j=0; j<have; j++) if (zout[j]!=out->getchar() && !diffFound) diffFound=recpos+j+1;
       recpos+=have;
 
     } while (rec_strm.avail_out==0);
   }
   while (diffIndex<=diffCount) {
-    if (mode==FDECOMPRESS) out->putc(diffByte[diffIndex]);
-    else if (mode==FCOMPARE) if (diffByte[diffIndex]!=out->getc() && !diffFound) diffFound=recpos+1;
+    if (mode==FDECOMPRESS) out->putchar(diffByte[diffIndex]);
+    else if (mode==FCOMPARE) if (diffByte[diffIndex]!=out->getchar() && !diffFound) diffFound=recpos+1;
     diffIndex++;
     recpos++;
   }
@@ -8854,11 +9657,11 @@ U64 decode_base64(File *in, File *out, FMode mode, U64 &diffFound){
     int linesize=0;
     int outlen=0;
     int tlf=0;
-    linesize=in->getc();
-    outlen=in->getc();
-    outlen+=(in->getc()<<8);
-    outlen+=(in->getc()<<16);
-    tlf=(in->getc());
+    linesize=in->getchar();
+    outlen=in->getchar();
+    outlen+=(in->getchar()<<8);
+    outlen+=(in->getchar()<<16);
+    tlf=(in->getchar());
     outlen+=((tlf&63)<<24);
     Array<U8> ptr((outlen>>2)*4+10);
     tlf=(tlf&192);
@@ -8872,7 +9675,7 @@ U64 decode_base64(File *in, File *out, FMode mode, U64 &diffFound){
     while(fle<outlen){
       len=0;
       for(i=0;i<3;i++){
-        int c=in->getc();
+        int c=in->getchar();
         if(c!=EOF) {
           inn[i]=c;
           len++;
@@ -8904,7 +9707,7 @@ U64 decode_base64(File *in, File *out, FMode mode, U64 &diffFound){
     else if (mode==FCOMPARE){
       for(i=0;i<outlen;i++){
         U8 b=ptr[i];
-        if (b!=out->getc() && !diffFound) diffFound=(int)out->curpos();
+        if (b!=out->getchar() && !diffFound) diffFound=(int)out->curpos();
       }
     }
     return outlen;
@@ -8929,7 +9732,7 @@ void encode_base64(File *in, File *out, U64 len64) {
   Array<U8> ptr(b64mem);
   int olen=5;
 
-  while (b=in->getc(),in_len++ , ( b != '=') && isbase64(b) && in_len<=len) {
+  while (b=in->getchar(),in_len++ , ( b != '=') && isbase64(b) && in_len<=len) {
     if (b==13 || b==10) {
        if (lfp==0) lfp=in_len ,tlf=b;
        if (tlf!=b) tlf=0;
@@ -8978,25 +9781,25 @@ void encode_base64(File *in, File *out, U64 len64) {
 }
 
 int encode_gif(File *in, File *out, U64 len, int &hdrsize) {
-  int codesize=in->getc(),diffpos=0,clearpos=0,bsize=0;
+  int codesize=in->getchar(),diffpos=0,clearpos=0,bsize=0;
   U64 beginin=in->curpos(),beginout=out->curpos();
   Array<U8> output(4096);
   hdrsize=6;
-  out->putc(hdrsize>>8);
-  out->putc(hdrsize&255);
-  out->putc(bsize);
-  out->putc(clearpos>>8);
-  out->putc(clearpos&255);
-  out->putc(codesize);
+  out->putchar(hdrsize>>8);
+  out->putchar(hdrsize&255);
+  out->putchar(bsize);
+  out->putchar(clearpos>>8);
+  out->putchar(clearpos&255);
+  out->putchar(codesize);
   for (int phase=0; phase<2; phase++) {
     in->setpos(beginin);
     int bits=codesize+1,shift=0,buffer=0;
     int blocksize=0,maxcode=(1<<codesize)+1,last=-1;
     Array<int> dict(4096);
     bool end=false;
-    while ((blocksize=in->getc())>0 && in->curpos()-beginin<len && !end) {
+    while ((blocksize=in->getchar())>0 && in->curpos()-beginin<len && !end) {
       for (int i=0; i<blocksize; i++) {
-        buffer|=in->getc()<<shift;
+        buffer|=in->getchar()<<shift;
         shift+=8;
         while (shift>=bits && !end) {
           int code=buffer&((1<<bits)-1);
@@ -9023,7 +9826,7 @@ int encode_gif(File *in, File *out, U64 len, int &hdrsize) {
             }
             output[4096-size]=j;
             if (phase==1) out->blockwrite(&output[4096-size], size); else diffpos+=size;
-            if (code==maxcode+1) { if (phase==1) out->putc(j); else diffpos++; }
+            if (code==maxcode+1) { if (phase==1) out->putchar(j); else diffpos++; }
             if (last!=-1) {
               if (++maxcode>=8191) return 0;
               if (maxcode<=4095)
@@ -9050,18 +9853,18 @@ int encode_gif(File *in, File *out, U64 len, int &hdrsize) {
   }
   diffpos=(int)out->curpos();
   out->setpos(beginout);
-  out->putc(hdrsize>>8);
-  out->putc(hdrsize&255);
-  out->putc(255-bsize);
-  out->putc((clearpos>>8)&255);
-  out->putc(clearpos&255);
+  out->putchar(hdrsize>>8);
+  out->putchar(hdrsize&255);
+  out->putchar(255-bsize);
+  out->putchar((clearpos>>8)&255);
+  out->putchar(clearpos&255);
   out->setpos(diffpos);
   return in->curpos()-beginin==len-1;
 }
 
 #define gif_write_block(count) { output[0]=(count);\
 if (mode==FDECOMPRESS) out->blockwrite(&output[0], (count)+1);\
-else if (mode==FCOMPARE) for (int j=0; j<(count)+1; j++) if (output[j]!=out->getc() && !diffFound) diffFound=outsize+j+1;\
+else if (mode==FCOMPARE) for (int j=0; j<(count)+1; j++) if (output[j]!=out->getchar() && !diffFound) diffFound=outsize+j+1;\
 outsize+=(count)+1; blocksize=0; }
 
 #define gif_write_code(c) { buffer+=(c)<<shift; shift+=bits;\
@@ -9069,30 +9872,30 @@ while (shift>=8) { output[++blocksize]=buffer&255; buffer>>=8;shift-=8;\
 if (blocksize==bsize) gif_write_block(bsize); }}
 
 int decode_gif(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
-  int diffcount=in->getc(), curdiff=0;
+  int diffcount=in->getchar(), curdiff=0;
   Array<int> diffpos(4096);
-  diffcount=((diffcount<<8)+in->getc()-6)/4;
-  int bsize=255-in->getc();
-  int clearpos=in->getc(); clearpos=(clearpos<<8)+in->getc();
+  diffcount=((diffcount<<8)+in->getchar()-6)/4;
+  int bsize=255-in->getchar();
+  int clearpos=in->getchar(); clearpos=(clearpos<<8)+in->getchar();
   clearpos=(69631-clearpos)&0xffff;
-  int codesize=in->getc(),bits=codesize+1,shift=0,buffer=0,blocksize=0;
+  int codesize=in->getchar(),bits=codesize+1,shift=0,buffer=0,blocksize=0;
   if (diffcount>4096 || clearpos<=(1<<codesize)+2) return 1;
   int maxcode=(1<<codesize)+1,input;
   Array<int> dict(4096);
   for (int i=0; i<diffcount; i++) {
-    diffpos[i]=in->getc();
-    diffpos[i]=(diffpos[i]<<8)+in->getc();
-    diffpos[i]=(diffpos[i]<<8)+in->getc();
-    diffpos[i]=(diffpos[i]<<8)+in->getc();
+    diffpos[i]=in->getchar();
+    diffpos[i]=(diffpos[i]<<8)+in->getchar();
+    diffpos[i]=(diffpos[i]<<8)+in->getchar();
+    diffpos[i]=(diffpos[i]<<8)+in->getchar();
     if (i>0) diffpos[i]+=diffpos[i-1];
   }
   Array<U8> output(256);
   size-=6+diffcount*4;
-  int last=in->getc(),total=(int)size+1,outsize=1;
-  if (mode==FDECOMPRESS) out->putc(codesize);
-  else if (mode==FCOMPARE) if (codesize!=out->getc() && !diffFound) diffFound=1;
+  int last=in->getchar(),total=(int)size+1,outsize=1;
+  if (mode==FDECOMPRESS) out->putchar(codesize);
+  else if (mode==FCOMPARE) if (codesize!=out->getchar() && !diffFound) diffFound=1;
   if (diffcount==0 || diffpos[0]!=0) gif_write_code(1<<codesize) else curdiff++;
-  while (size-->=0 && (input=in->getc())>=0) {
+  while (size-->=0 && (input=in->getchar())>=0) {
     int code=-1, key=(last<<8)+input;
     for (int i=(1<<codesize)+2; i<=min(maxcode,4095); i++) if (dict[i]==key) code=i;
     if (curdiff<diffcount && total-(int)size>diffpos[curdiff]) curdiff++,code=-1;
@@ -9116,8 +9919,8 @@ int decode_gif(File *in, U64 size, File *out, FMode mode, U64 &diffFound) {
     if (blocksize==bsize) gif_write_block(bsize);
   }
   if (blocksize>0) gif_write_block(blocksize);
-  if (mode==FDECOMPRESS) out->putc(0);
-  else if (mode==FCOMPARE) if (0!=out->getc() && !diffFound) diffFound=outsize+1;
+  if (mode==FDECOMPRESS) out->putchar(0);
+  else if (mode==FCOMPARE) if (0!=out->getchar() && !diffFound) diffFound=outsize+1;
   return outsize+1;
 }
 
@@ -9140,7 +9943,7 @@ void direct_encode_block(Filetype type, File *in, U64 len, Encoder &en, int info
   printf("Compressing... ");
   for (U64 j=0; j<len; ++j) {
     if (!(j&0xfff)) en.print_status(j, len);
-    en.compress(in->getc());
+    en.compress(in->getchar());
   }
   printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b");
 }
@@ -9185,8 +9988,8 @@ void transform_encode_block(Filetype type, File *in, U64 len, Encoder &en, int i
       decode_func(type, en, &tmp, tmpsize, info, in, FCOMPARE, diffFound);
     }
     // Test fails, compress without transform
-    if (diffFound>0 || tmp.getc()!=EOF) {
-      printf("Transform fails at %I64u, skipping...\n", diffFound-1);
+    if (diffFound>0 || tmp.getchar()!=EOF) {
+      printf("Transform fails at %" PRIu64 ", skipping...\n", diffFound-1);
       in->setpos(begin);
       direct_encode_block(DEFAULT, in, len, en);
     } else {
@@ -9220,10 +10023,10 @@ void compressRecursive(File *in, const U64 blocksize, Encoder &en, char *blstr, 
     "24b-image", "32b-image", "audio", "exe", "cd", "zlib", "base64", "gif", "png-8b", "png-8b-grayscale", "png-24b", "png-32b"};
   static const char* audiotypes[4]={"8b-mono", "8b-stereo", "16b-mono","16b-stereo"};
   Filetype type=DEFAULT;
-  int blnum=0, info;  // image width or audio type
+  int blnum=0, info=0;  // image width or audio type
   U64 begin=in->curpos();
   U64 block_end=begin+blocksize;
-  char b2[32];
+  char b2[32] = {0};
   strcpy(b2, blstr);
   if (b2[0]) strcat(b2, "-");
   if (recursion_level==5) {
@@ -9246,7 +10049,7 @@ void compressRecursive(File *in, const U64 blocksize, Encoder &en, char *blstr, 
     if (len>0) {
       en.set_status_range(p1,p2=p1+pscale*len);
       sprintf(blstr,"%s%d",b2,blnum++);
-      printf(" %-11s | %-16s |%10I64u bytes [%I64u - %I64u]",blstr,typenames[(type==ZLIB && (info>>24)>=PNG8)?info>>24:type],len,begin,detected_end-1);
+      printf(" %-11s | %-16s |%10" PRIu64 " bytes [%" PRIu64 " - %" PRIu64 "]",blstr,typenames[(type==ZLIB && (info>>24)>=PNG8)?info>>24:type],len,begin,detected_end-1);
       if (type==AUDIO) printf(" (%s)", audiotypes[info%4]);
       else if (type==IMAGE1 || type==IMAGE4 || type==IMAGE8 || type==IMAGE8GRAY || type==IMAGE24 || type==IMAGE32 || (type==ZLIB && (info>>24)>=PNG8)) printf(" (width: %d)", (type==ZLIB)?(info&0xFFFFFF):info);
       else if (hasRecursion(type) && (info>>24) > 0) printf(" (%s)",typenames[info>>24]);
@@ -9276,7 +10079,7 @@ void compress(const char* filename, U64 filesize, Encoder& en) {
   char blstr[32]="";
   compressRecursive(&in, filesize, en, blstr, 0, 0.0f, 1.0f);
   in.close();
-  printf("Compressed from %I64u to %I64u bytes.\n",filesize,en.size()-start);
+  printf("Compressed from %" PRIu64 " to %" PRIu64 " bytes.\n",filesize,en.size()-start);
 }
 
 U64 decompressRecursive(File *out, U64 blocksize, Encoder& en, FMode mode, int recursion_level) {
@@ -9291,7 +10094,6 @@ U64 decompressRecursive(File *out, U64 blocksize, Encoder& en, FMode mode, int r
     len|=en.decompress()<<16;
     len|=en.decompress()<<8;
     len|=en.decompress();
-
     if (hasInfo(type)) {
       info=0; for (int i=0; i<4; ++i) { info<<=8; info+=en.decompress(); }
     }
@@ -9308,9 +10110,9 @@ U64 decompressRecursive(File *out, U64 blocksize, Encoder& en, FMode mode, int r
     } else {
       for (U64 j=0; j<len; ++j) {
         if (!(j&0xfff)) en.print_status();
-        if (mode==FDECOMPRESS) out->putc(en.decompress());
+        if (mode==FDECOMPRESS) out->putchar(en.decompress());
         else if (mode==FCOMPARE) {
-          if (en.decompress()!=out->getc() && !diffFound) {
+          if (en.decompress()!=out->getchar() && !diffFound) {
             mode=FDISCARD;
             diffFound=i+j+1;
           }
@@ -9341,12 +10143,12 @@ void decompress(const char* filename, U64 filesize, Encoder& en) {
     f.create(filename);
     printf("Extracting");
   }
-  printf(" %s %I64u -> ", filename, filesize);
+  printf(" %s %" PRIu64 " -> ", filename, filesize);
 
   // Decompress/Compare
   U64 r=decompressRecursive(&f, filesize, en, mode, 0);
-  if (mode==FCOMPARE && !r && f.getc()!=EOF) printf("file is longer\n");
-  else if (mode==FCOMPARE && r) printf("differ at %I64u\n",r-1);
+  if (mode==FCOMPARE && !r && f.getchar()!=EOF) printf("file is longer\n");
+  else if (mode==FCOMPARE && r) printf("differ at %" PRIu64 "\n",r-1);
   else if (mode==FCOMPARE) printf("identical\n");
   else printf("done   \n");
   f.close();
@@ -9375,7 +10177,7 @@ int putsize(String& archive, String& s, const char* fname, int base) {
     U64 len=f.curpos();
     if (len>=0) {
       static char blk[24];
-      sprintf(blk, "%I64u\t", len);
+      sprintf(blk, "%" PRIu64 "\t", len);
       archive+=blk;
       archive+=(fname+base);
       archive+="\n";
@@ -9387,6 +10189,7 @@ int putsize(String& archive, String& s, const char* fname, int base) {
   }
   return result;
 }
+
 
 #ifdef WINDOWS
 
@@ -9561,7 +10364,7 @@ int main(int argc, char** argv) {
       int i;
       for (i=1; i<argc; ++i) {
         String name(argv[i]);
-        int len=name.size()-1;
+        int len=(int)name.size()-1;
         for (int j=0; j<=len; ++j)  // change \ to /
           if (name[j]=='\\') name[j]='/';
         while (len>0 && name[len-1]=='/')  // remove trailing /
@@ -9582,8 +10385,8 @@ int main(int argc, char** argv) {
       archive=new FileDisk();
       archive->create(archiveName.c_str());
       archive->append(PROGNAME);
-      archive->putc(0);
-      archive->putc(level | (trainEXE << 4) | (trainTXT << 5) | (adaptive << 6) | (skipRGB << 7));
+      archive->putchar(0);
+      archive->putchar(level | (trainEXE << 4) | (trainTXT << 5) | (adaptive << 6) | (skipRGB << 7));
       printf("Creating archive %s with %d file(s)...\n",
         archiveName.c_str(), files);
     }
@@ -9596,7 +10399,7 @@ int main(int argc, char** argv) {
       String header;
       int len=(int)strlen(PROGNAME)+2, c, i=0;
       header.resize(len+1);
-      while (i<len && (c=archive->getc())!=EOF) {
+      while (i<len && (c=archive->getchar())!=EOF) {
         header[i]=c;
         i++;
       }
@@ -9670,11 +10473,11 @@ int main(int argc, char** argv) {
     for (U32 i=0; i<files; ++i) total_size+=fsize[i];
     if (mode==COMPRESS) {
       for (U32 i=0; i<files; ++i) {
-        printf("\n%d/%d  Filename: %s (%I64u bytes)\n", i+1, files, fname[i], fsize[i]);
+        printf("\n%d/%d  Filename: %s (%" PRIu64 " bytes)\n", i+1, files, fname[i], fsize[i]);
         compress(fname[i], fsize[i], en);
       }
       en.flush();
-      printf("\nTotal %I64u bytes compressed to %I64u bytes.\n", total_size, en.size());
+      printf("\nTotal %" PRIu64 " bytes compressed to %" PRIu64 " bytes.\n", total_size, en.size());
     }
 
     // Decompress files to dir2: paq8px -d dir1/archive.paq8px dir2
@@ -9685,7 +10488,7 @@ int main(int argc, char** argv) {
       String dir(argc>2?argv[2]:argv[1]);
       if (argc==2) {  // chop "/archive.paq8px"
         int i;
-        for (i=dir.size()-2; i>=0; --i) {
+        for (i=(int)dir.size()-2; i>=0; --i) {
           if (dir[i]=='/' || dir[i]=='\\') {
             dir[i]=0;
             break;
@@ -9709,9 +10512,10 @@ int main(int argc, char** argv) {
     delete archive;
     if (!doList) programChecker.print();
   }
-  catch(const char* s) {
-    if (s) printf("%s\n", s);
-  }
+  // we catch only the intentional exceptions from quit() to exit gracefully
+  // any other exception should result in a crash and must be investigated
+  catch(IntentionalException const& e) {} 
+
   if (pause) {
     printf("\nClose this window or press ENTER to continue...\n");
     getchar();
